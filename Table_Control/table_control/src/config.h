@@ -1,0 +1,9 @@
+#define BRIGHTNESS_BUTTON_PIN
+#define PREDEF_BUTTON_PIN
+#define CUSTOM_BUTTON_PIN
+
+#define KNOB_CLK_PIN 3
+#define KNOB_DATA_PIN 4
+#define KNOW_BUTTON_PIN
+
+#define STRIP_DATA_PIN

@@ -3,6 +3,11 @@
 
 FILE(GLOB_RECURSE app_sources ${CMAKE_SOURCE_DIR}/src/*.*)
 
-idf_component_register(SRCS ${app_sources}
-REQUIRES espressif__led_strip)
-
+idf_component_register(
+    SRCS "main.c" "controller.c"
+    INCLUDE_DIRS "."
+    REQUIRES 
+        led_strip
+        fsm
+        knob
+)
