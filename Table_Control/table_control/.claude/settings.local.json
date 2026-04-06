@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(xargs grep:*)",
+      "Bash(\"/c/Users/orell/.platformio/penv/Scripts/python\" -c \"import idf_component_manager; print\\(idf_component_manager.__file__\\)\")",
+      "Bash(\"/c/Users/orell/.platformio/penv/Scripts/pip\" list:*)",
+      "Bash(python -c \"import idf_component_manager; print\\(idf_component_manager.__file__\\)\")",
+      "Bash(python -m idf_component_manager.prepare_components)",
+      "Bash(\"/c/Users/orell/.platformio/penv/.espidf-5.5.0/Scripts/python.exe\" --version)",
+      "Bash(\"/c/Users/orell/.platformio/penv/.espidf-5.5.0/Scripts/python.exe\" -c \"import pip\")"
+    ]
+  }
+}

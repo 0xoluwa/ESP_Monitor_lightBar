@@ -4,6 +4,6 @@
 
 #define KNOB_CLK_PIN 3
 #define KNOB_DATA_PIN 4
-#define KNOW_BUTTON_PIN
+#define KNOB_BUTTON_PIN 5
 
 #define STRIP_DATA_PIN

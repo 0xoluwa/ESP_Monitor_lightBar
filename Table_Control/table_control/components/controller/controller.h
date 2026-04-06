@@ -1,0 +1,56 @@
+#ifndef __CONTROLLER_H__
+#define __CONTROLLER_H__
+
+#include "fsm.h"
+#include "driver/gpio.h"
+
+
+#define QUEUE_DEPTH 50
+
+typedef enum : uint8_t {
+    SHORT_PRESS,
+    LONG_PRESS
+} button_duration;
+
+typedef struct controller_evt{
+    fsm_event super;
+    union {
+        int knob_count;
+        uint8_t knob_button_duration;
+    };
+}controller_event;
+
+enum controller_signal : uint8_t {
+    SIG_KNOB_BTN_PRESS = SIG_USER_CODE,     // encoder SW pressed (debounced)
+    SIG_KNOB,
+    SIG_MAX
+};
+
+fsm_state top_main_state(fsm *me, fsm_event *event);
+fsm_state brightness_state(fsm *me, fsm_event *event);
+fsm_state preset_state(fsm *me, fsm_event *event);
+
+fsm_state entry_handler (fsm *me, fsm_event *event);
+
+typedef struct CONTROLLER controller;
+
+void controller_ctor(controller * me);
+void controller_init(controller * me, const char* controller_name);
+
+void post_knob_count(controller * me, int knob_count);
+void post_knob_button(controller *me, button_duration press_duration);
+
+struct CONTROLLER{
+    fsm super;
+
+    struct {
+        gpio_num_t knob_clk_pin;
+        gpio_num_t knob_data_pin;
+        gpio_num_t strip_data_pin;
+        gpio_num_t knob_btn_pin;
+    } pin;
+};
+
+
+
+#endif

@@ -5,10 +5,17 @@
 void fsm_ctor(fsm *me, uint8_t queue_depth, uint32_t event_size){
     me->queue_ = xQueueCreate(queue_depth, event_size);
     configASSERT(me->queue_);
+
+    const uint8_t TIMER_NUMBER = me->NUM_TIMERS;
+
+    static TimerHandle_t timers[TIMER_NUMBER];
+
+    me->xTimers = 
 }
 
 void fsm_init(fsm *me, const char * task_name, state_handler entry_function){
     assert(entry_function);
+
     me->state = entry_function;
     assert(xTaskCreate(&fsm_dispatch, task_name, 4096, me, 1, &me->task_));
 }
@@ -18,7 +25,7 @@ BaseType_t fsm_post(fsm *me, fsm_event const * event){
 }
 
 BaseType_t fsm_post_from_isr(fsm *me, fsm_event const * event){
-    return xQueueSendFromISR(me->queue_, event, 0);
+    return xQueueSendFromISR(me->queue_, event, NULL);
 }
 
 void fsm_dispatch(void *pv){
@@ -28,4 +35,12 @@ void fsm_dispatch(void *pv){
         xQueueReceive(me->queue_, &e, portMAX_DELAY); // ← protected getter
         (*(me->state))(me, &e);
     }
+}
+
+void fsm_arm_time(fsm *me, uint64_t frequency){
+    if (me->timer_ == NULL){
+        me->timer_ = xTimerCreate("timer", frequency, pdTRUE, NULL, NULL);
+        assert(me->timer_);
+    }
+
 }

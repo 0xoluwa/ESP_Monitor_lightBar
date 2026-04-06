@@ -1,7 +1,0 @@
-# This file was automatically generated for projects
-# without default 'CMakeLists.txt' file.
-
-
-idf_component_register(SRCS "InterruptEncoder.c" "ESP32Encoder.cpp" 
-                        INCLUDE_DIRS ".")
-
