@@ -13,6 +13,7 @@ void controller_ctor(controller * me){
 
 void controller_init(controller * me, const char* controller_name){
     espnow_init();
+    wait_for_connection();
     fsm *fsm_pointer = (fsm *) me;
     fsm_init(fsm_pointer, controller_name, entry_handler);
 }

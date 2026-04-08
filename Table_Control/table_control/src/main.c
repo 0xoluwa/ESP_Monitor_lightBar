@@ -6,7 +6,7 @@
 #include "controller.h"
 #include "driver/gpio.h"
 
-#define TRIGGER_FREQUENCY_MS 5
+#define TRIGGER_FREQUENCY_MS 10
 #define LONG_PRESS_TIME 2000
 #define SHORT_PRESS_TIME 10
 
@@ -39,7 +39,8 @@ static void knob_setup(){
     encoder_fsm_init(&knob_handle);
 
     TickType_t frequency = pdMS_TO_TICKS(TRIGGER_FREQUENCY_MS);
-    xTimerCreate("knob", frequency, pdTRUE, &knob_timer_handle, knob_cb);
+    knob_timer_handle = xTimerCreate("knob", frequency, pdTRUE, NULL, knob_cb);
+    xTimerStart(knob_timer_handle, 0);
 }
 
 static void device_setup(){

@@ -1,214 +1,69 @@
 /*
- * main.cpp — application entry point
+ * main.cpp — Lightbar application entry point
  *
- * Responsibilities:
- *   1. Configure KY-040 encoder GPIO pins
- *   2. Install ISR handlers (CLK, SW pins)
- *   3. Instantiate and start LedAO
- *   4. Return — FreeRTOS scheduler keeps everything running
+ * Wires together:
+ *   1. GPIO interrupts for power and preset buttons
+ *   2. lightbar_controller FSM (handles ESP-NOW internally)
  *
- * Pin assignments (ESP32-C3 Supermini — adjust for your board):
- *   PIN_CLK  GPIO4   encoder clock output (A channel)
- *   PIN_DT   GPIO5   encoder data  output (B channel)
- *   PIN_SW   GPIO6   encoder push-button (active LOW)
+ * Pin assignments (Seeed XIAO ESP32-C3 — adjust as needed):
+ *   PIN_POWER_BTN   GPIO_NUM_3   power toggle button (active LOW, pull-up)
+ *   PIN_PRESET_BTN  GPIO_NUM_4   preset cycle button (active LOW, pull-up)
+ *   PIN_LED_DATA    GPIO_NUM_2   WS2812 data line (SPI MOSI)
  */
 
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
+extern "C" {
+#include "controller.h"
+}
 #include "driver/gpio.h"
-#include "driver/gpio_filter.h"
 #include "esp_log.h"
-#include "esp_timer.h"      // esp_timer_get_time() — safe in ISR context
-#include "ESP32Encoder/src/InterruptEncoder.h"
-
-#include "led_ao.hpp" // pulls in ao_v2.hpp, events.hpp, signals.hpp
 
 static const char *TAG = "main";
 
-// ---------------------------------------------------------------------------
-// Pin definitions
-// ---------------------------------------------------------------------------
+// ─── Pin definitions ─────────────────────────────────────────────────────────
+static constexpr gpio_num_t PIN_POWER_BTN  = GPIO_NUM_3;
+static constexpr gpio_num_t PIN_PRESET_BTN = GPIO_NUM_4;
+static constexpr gpio_num_t PIN_LED_DATA   = GPIO_NUM_2;
 
-static constexpr gpio_num_t PIN_CLK = GPIO_NUM_3;
-static constexpr gpio_num_t PIN_DT  = GPIO_NUM_4;
-static constexpr gpio_num_t PIN_SW  = GPIO_NUM_10;
+// ─── Global controller instance ──────────────────────────────────────────────
+static lightbar_controller g_lb;
 
-// ---------------------------------------------------------------------------
-// Button debounce threshold
-// 50 ms: long enough to suppress contact bounce, short enough to feel instant
-// ---------------------------------------------------------------------------
-
-static constexpr int64_t DEBOUNCE_US = 1000 * 500;
-
-// ---------------------------------------------------------------------------
-// Global AO instance — static storage duration, lives for the whole program
-// ---------------------------------------------------------------------------
-
-static LedAO g_ledAO;
-
-
-
-// ---------------------------------------------------------------------------
-// ISR: encoder rotation
-//
-// Triggered on every FALLING edge of CLK (A channel).
-// At that moment DT (B channel) is sampled to determine direction:
-//
-//   CLK falls while DT is still HIGH → clockwise     (CW)
-//   CLK falls while DT is already LOW → counter-clockwise (CCW)
-//
-// This is the single-edge quadrature decode — simple, sufficient for a
-// hand-operated encoder at low RPM. For fast mechanical encoders or motors
-// use both edges (ANYEDGE) and a full 4-state table.
-//
-// IRAM_ATTR: function placed in IRAM so it runs even when flash cache is
-// busy (e.g. during NVS writes or OTA). All ISRs on ESP-IDF must have this.
-// ---------------------------------------------------------------------------
-
-#define micros() esp_timer_get_time()
-#define digitalRead(pin) gpio_get_level((gpio_num_t)pin)
-
-InterruptEncoder knob;
-
-void IRAM_ATTR encoderAISR(void * arg) {
-    InterruptEncoder * object = (InterruptEncoder *)arg;
-    static int64_t previousUS = 0;
-    int64_t start = micros();
-    int64_t duration = start - previousUS;
-    Signal sig = SIG_MAX;
-    BaseType_t woken = pdFALSE;
-
-    if (duration >= DEBOUNCE_US) {
-        previousUS = start;
-        object->microsTimeBetweenTicks = duration;
-        object->aState = digitalRead(object->apin);
-        object->bState = digitalRead(object->bpin);
-
-
-        if (object->aState == object->bState){
-            //object->count = object->count + 1;
-            sig = SIG_KNOB_CW;
-        }
-        else{
-            sig = SIG_KNOB_CCW;
-            //object->count = object->count - 1;
-        }
-
-        const Event  e   = { sig };
-
-        g_ledAO.postFromISR(e, &woken);
-    }
-
-    // If posting unblocked a higher-priority task, yield immediately so that
-        // task runs as soon as the ISR exits — this is what keeps latency low.
-    portYIELD_FROM_ISR(woken);
+// ─── ISR handlers ─────────────────────────────────────────────────────────────
+static void IRAM_ATTR power_btn_isr(void *arg) {
+    lightbar_post_power_isr((lightbar_controller *)arg);
 }
 
-// ---------------------------------------------------------------------------
-// ISR: encoder push-button
-//
-// Triggered on FALLING edge (button pressed, pin pulled LOW).
-// Software debounce via timestamp comparison — no timer required.
-//
-// Note on the static local `lastUs`:
-//   Safe on ESP32-C3 (single-core RISC-V).
-//   On dual-core ESP32/S3 two cores could race on this variable.
-//   Fix for dual-core: use a portMUX_TYPE spinlock or an atomic<int64_t>.
-// ---------------------------------------------------------------------------
-
-static void IRAM_ATTR buttonISR(void * /*arg*/) {
-    static int64_t lastUs = 0;
-
-    const int64_t now = esp_timer_get_time();
-    if ((now - lastUs) < DEBOUNCE_US) {
-        return; // bounce — discard
-    }
-    lastUs = now;
-
-    const Event e = { SIG_BTN_PRESS };
-
-    BaseType_t woken = pdFALSE;
-    g_ledAO.postFromISR(e, &woken);
-
-    portYIELD_FROM_ISR(woken);
+static void IRAM_ATTR preset_btn_isr(void *arg) {
+    lightbar_post_preset_isr((lightbar_controller *)arg);
 }
 
-// ---------------------------------------------------------------------------
-// GPIO configuration
-//
-// gpio_config_t is a struct; we configure pins in two passes:
-//   Pass 1 — CLK + DT  (input, pull-up, no interrupt yet)
-//   Pass 2 — SW        (input, pull-up, falling-edge interrupt)
-//
-// CLK gets its interrupt type set separately (gpio_set_intr_type) after the
-// first gpio_config call so DT is not accidentally given an interrupt too.
-// ---------------------------------------------------------------------------
-
-static void configureButtonGPIO() {
+// ─── GPIO setup ──────────────────────────────────────────────────────────────
+static void gpio_setup(void) {
     gpio_config_t io = {};
-
-    // --- SW: input with internal pull-up, falling-edge interrupt ---
-    io.pin_bit_mask  = (1ULL << PIN_SW);
-    io.mode          = GPIO_MODE_INPUT;
-    io.pull_up_en    = GPIO_PULLUP_ENABLE;
-    io.pull_down_en  = GPIO_PULLDOWN_DISABLE;
-    io.intr_type     = GPIO_INTR_NEGEDGE;
+    io.pin_bit_mask = (1ULL << PIN_POWER_BTN) | (1ULL << PIN_PRESET_BTN);
+    io.mode         = GPIO_MODE_INPUT;
+    io.pull_up_en   = GPIO_PULLUP_ENABLE;
+    io.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    io.intr_type    = GPIO_INTR_NEGEDGE;    // trigger on falling edge (button press)
     gpio_config(&io);
+
+    gpio_install_isr_service(0);
+    gpio_isr_handler_add(PIN_POWER_BTN,  power_btn_isr,  &g_lb);
+    gpio_isr_handler_add(PIN_PRESET_BTN, preset_btn_isr, &g_lb);
 }
 
-// ---------------------------------------------------------------------------
-// app_main — ESP-IDF entry point
-//
-// extern "C" is mandatory: ESP-IDF's startup code calls app_main() by name
-// using a C linkage symbol. Without extern "C", the C++ compiler mangles the
-// name and the linker cannot find it.
-//
-// app_main is allowed to return on ESP-IDF — the FreeRTOS scheduler continues
-// running all tasks that have been created. It does NOT need to loop forever.
-// ---------------------------------------------------------------------------
+// ─── Entry point ─────────────────────────────────────────────────────────────
+extern "C" void app_main(void) {
+    ESP_LOGI(TAG, "Lightbar starting");
 
-void gpio_filter_setup(gpio_num_t gpio_num){
-    gpio_glitch_filter_handle_t filter_handle;
+    // 1. Construct controller (NVS init, LED strip init, FSM queue)
+    lightbar_ctor(&g_lb, PIN_POWER_BTN, PIN_PRESET_BTN, PIN_LED_DATA);
 
-    gpio_pin_glitch_filter_config_t filter_config = {
-        .clk_src = GLITCH_FILTER_CLK_SRC_DEFAULT,
-        .gpio_num = gpio_num
-    };
+    // 2. Install GPIO ISRs for local buttons
+    gpio_setup();
 
-    gpio_new_pin_glitch_filter(&filter_config, &filter_handle);
-    gpio_glitch_filter_enable(filter_handle); 
-}
+    // 3. Start ESP-NOW receiver and FSM task (posts initial SIG_INIT)
+    lightbar_init(&g_lb, "lightbar");
 
-extern "C" void app_main() {
-    ESP_LOGI(TAG, "Starting encoder/NeoPixel AO demo");
-    gpio_filter_setup(PIN_CLK);
-    gpio_filter_setup(PIN_DT);
-    gpio_filter_setup(PIN_SW);
-     
-    knob.attach(PIN_CLK, PIN_DT);
-
-    // 1. Install the shared GPIO ISR service.
-    //    Must be called once before any gpio_isr_handler_add().
-    //    The '0' argument is the ESP_INTR_FLAG — 0 selects a default level
-    //    interrupt allocated from IRAM automatically.
-    //ESP_ERROR_CHECK(gpio_install_isr_service(0));
-
-    // 2. Configure all GPIO pins
-    configureButtonGPIO();
-
-    // 3. Register per-pin ISR handlers
-    //    These are called by the shared ISR service dispatcher when the
-    //    corresponding pin triggers. Much cheaper than separate ISR vectors.
-    //ESP_ERROR_CHECK(gpio_isr_handler_add(PIN_CLK, encoderISR, nullptr));
-    ESP_ERROR_CHECK(gpio_isr_handler_add(PIN_SW,  buttonISR,  nullptr));
-
-    // 4. Start the Active Object — spawns the FreeRTOS task.
-    //    After this call the AO is live: it receives the initial SIG_ENTRY
-    //    and sits blocking on its queue waiting for encoder events.
-    g_ledAO.start("LedAO", 8192, 5);
-
-    ESP_LOGI(TAG, "AO started — app_main returning");
-
-    // app_main returns here. The scheduler keeps LedAO's task running.
-    // No vTaskDelay(portMAX_DELAY) needed — we have nothing else to do.
+    ESP_LOGI(TAG, "Lightbar FSM started — app_main returning");
+    // FreeRTOS scheduler keeps the FSM task running.
 }

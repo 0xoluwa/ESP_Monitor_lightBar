@@ -32,9 +32,6 @@ typedef struct {
     gpio_num_t pinB;
 } encoder_handle_t;
 
-
-static encoder_handle_t me_knob;
-
 void encoder_fsm_ctor(encoder_handle_t *me, gpio_num_t clk_pin, gpio_num_t dat_pin){
     me->pinA = clk_pin;
     me->pinB = dat_pin;

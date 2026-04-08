@@ -24,6 +24,7 @@ struct FSM{
     state_handler state;
     QueueHandle_t queue_;
     TaskHandle_t  task_;
+    uint8_t event_structure_size_;
 };
 
 
