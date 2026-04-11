@@ -5,14 +5,14 @@
 #include "driver/gpio.h"
 
 
-#define QUEUE_DEPTH 50
+#define QUEUE_DEPTH 20
 
 typedef enum : uint8_t {
     SHORT_PRESS,
     LONG_PRESS
 } button_duration;
 
-typedef struct controller_evt{
+typedef struct controller_evt {
     fsm_event super;
     union {
         int knob_count;
@@ -26,16 +26,16 @@ enum controller_signal : uint8_t {
     SIG_MAX
 };
 
-fsm_state top_main_state(fsm *me, fsm_event *event);
-fsm_state brightness_state(fsm *me, fsm_event *event);
-fsm_state preset_state(fsm *me, fsm_event *event);
-
-fsm_state entry_handler (fsm *me, fsm_event *event);
-
 typedef struct CONTROLLER controller;
 
 void controller_ctor(controller * me);
 void controller_init(controller * me, const char* controller_name);
+
+fsm_state top_main_state(controller *me, fsm_event *event);
+fsm_state brightness_state(controller *me, fsm_event *event);
+fsm_state preset_state(controller *me, fsm_event *event);
+
+fsm_state entry_handler (controller *me, fsm_event *event);
 
 void post_knob_count(controller * me, int knob_count);
 void post_knob_button(controller *me, button_duration press_duration);

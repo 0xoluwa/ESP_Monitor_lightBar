@@ -4,11 +4,12 @@
 #include "config.h"
 #include "esp_timer.h"
 #include "controller.h"
+#include "connection_setup.h"
 #include "driver/gpio.h"
 
 #define TRIGGER_FREQUENCY_MS 10
-#define LONG_PRESS_TIME 2000
-#define SHORT_PRESS_TIME 10
+#define LONG_PRESS_TIME  2000000   // 3 seconds in microseconds
+#define SHORT_PRESS_TIME   50000   // 50 ms in microseconds
 
 static TimerHandle_t knob_timer_handle;
 static encoder_handle_t knob_handle;
@@ -54,20 +55,19 @@ static void IRAM_ATTR knob_button_isr(void* arg) {
     
     int level = gpio_get_level((gpio_num_t)KNOB_BUTTON_PIN);
 
-    if (level == 1) { 
+    if (level == 0) { 
         press_start_time = current_time;
     } else {
         if (press_start_time == 0) return; // Ignore release if we missed the press
 
         uint64_t duration = current_time - press_start_time;
+        press_start_time = 0; // Always reset so stale time can't leak into the next event
 
         if (duration >= LONG_PRESS_TIME) {
             post_knob_button(&device, LONG_PRESS);
         } else if (duration >= SHORT_PRESS_TIME) {
             post_knob_button(&device, SHORT_PRESS);
         }
-        
-        press_start_time = 0;
     }
 }
 
@@ -75,8 +75,8 @@ static void knob_button_setup() {
     gpio_config_t knob_button_gpio_config = {
         .pin_bit_mask = (1ULL << KNOB_BUTTON_PIN),
         .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_ENABLE,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type = GPIO_INTR_ANYEDGE // Triggers when button is pressed (to High)
     };
 
@@ -91,6 +91,7 @@ static void knob_button_setup() {
 }
 
 void app_main() {
+    espnow_init();      // initialize WiFi + ESP-NOW before any task calls send_packet
     device_setup();
     knob_setup();
     knob_button_setup();

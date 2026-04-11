@@ -6,9 +6,6 @@
 #include "freertos/task.h"
 
 
-
-
-
 typedef enum : uint8_t{
     STATE_IGNORED,
     STATE_HANDLED = 1,
@@ -28,7 +25,7 @@ struct FSM{
 };
 
 
-#define TRAN(STATE) (me->state = (STATE), STATE_TRANSITION)
+#define TRAN(STATE) (me_fsm->state = (STATE), STATE_TRANSITION)
 
 
 void fsm_ctor(fsm *me, uint8_t queue_depth, uint32_t event_size);
