@@ -16,7 +16,7 @@ typedef enum {
 } enc_state_t;
 
 // [prev_state][curr_state] → delta
-static const int8_t FSM[4][4] = {
+static const int8_t knob_lookup[4][4] = {
 //  curr:  S0   S1   S2   S3
 /* S0 */  { 0,  -1,  +1,  99 },
 /* S1 */  {+1,   0,  99,  -1 },
@@ -50,10 +50,10 @@ void encoder_handle_tick(encoder_handle_t *me) {
     uint8_t b = gpio_get_level(me->pinB);
     enc_state_t next = (enc_state_t)((a << 1) | b);
 
-    int8_t step = FSM[me->state][next];
+    int8_t step = knob_lookup[me->state][next];
 
     if (step == 99) {
-        me->error_count++;
+        //me->error_count++;
         return;
     }
 

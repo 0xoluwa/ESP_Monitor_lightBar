@@ -6,7 +6,7 @@
 #include "fsm_events.h"
 
 typedef enum __attribute__((packed)) {
-    TIMER_CHANNEL_0,
+    TIMER_CHANNEL_0 = 0,
     TIMER_CHANNEL_1,
     TIMER_CHANNEL_2,
     TIMER_CHANNEL_3,
