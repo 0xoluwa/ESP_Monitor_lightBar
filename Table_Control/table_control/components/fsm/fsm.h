@@ -32,7 +32,7 @@ extern fsm_event RESERVED_EVENT[];
 
 #define TRAN(STATE) (((fsm*) me)->state = ((state_handler) STATE), STATE_TRANSITION)
 
-#define SUPER(STATE, EVENT) ((STATE) ((fsm *) me, EVENT))
+#define SUPER(STATE, EVENT) ((STATE) (me, EVENT))
 
 #define STATE_EXIT(STATE)   if (STATE == ((fsm *) me)->state) ESP_ERROR_CHECK(-1);               \
                             else{                                                               \

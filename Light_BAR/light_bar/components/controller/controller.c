@@ -16,7 +16,10 @@ static const char *TAG = "lightbar";
 // Constants
 // ─────────────────────────────────────────────────────────────────────────────
 
-static const float k_presets[3] = { CCT_WARM, CCT_NEUTRAL, CCT_COOL };
+// Preset CCT frame indices (0–99).  Derived from Kelvin values:
+//   warm  2700 K → frame 24,  neutral 4000 K → frame 50,  cool 6500 K → frame 99
+// Formula: round((K - CCT_MIN) * (CCT_FRAMES-1) / (CCT_MAX - CCT_MIN))
+static const int16_t k_preset_frames[3] = { 24, 50, 99 };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Utility
@@ -83,11 +86,14 @@ static void cct_to_rgb(float cct_k, uint8_t *r, uint8_t *g, uint8_t *b) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 static void refresh_strip(lightbar_controller *me) {
+    // Convert frame units → physical values
+    float brt   = me->brt_anim / (float)(BRT_FRAMES - 1);
+    float cct_k = CCT_MIN + me->cct_anim * ((CCT_MAX - CCT_MIN) / (float)(CCT_FRAMES - 1));
+
     uint8_t r, g, b;
-    cct_to_rgb(me->current_cct, &r, &g, &b);
+    cct_to_rgb(cct_k, &r, &g, &b);
 
     // Apply brightness in linear space first, then gamma-correct
-    float brt = me->current_brightness;
     r = me->gamma_lut[(uint8_t)(r * brt)];
     g = me->gamma_lut[(uint8_t)(g * brt)];
     b = me->gamma_lut[(uint8_t)(b * brt)];
@@ -107,27 +113,27 @@ static void refresh_strip(lightbar_controller *me) {
 static bool step_animation(lightbar_controller *me) {
     bool changed = false;
 
-    // Brightness
-    float db = me->target_brightness - me->current_brightness;
-    if (fabsf(db) < ANIM_BRT_EPSILON) {
-        if (me->current_brightness != me->target_brightness) {
-            me->current_brightness = me->target_brightness;
+    // Brightness — interpolate in frame units (0.0–99.0)
+    float db = (float)me->brt_target - me->brt_anim;
+    if (fabsf(db) < ANIM_EPSILON) {
+        if (me->brt_anim != (float)me->brt_target) {
+            me->brt_anim = (float)me->brt_target;
             changed = true;
         }
     } else {
-        me->current_brightness += db * ANIM_ALPHA;
+        me->brt_anim += db * ANIM_ALPHA;
         changed = true;
     }
 
-    // CCT
-    float dc = me->target_cct - me->current_cct;
-    if (fabsf(dc) < ANIM_CCT_EPSILON) {
-        if (me->current_cct != me->target_cct) {
-            me->current_cct = me->target_cct;
+    // CCT — interpolate in frame units (0.0–99.0)
+    float dc = (float)me->cct_target - me->cct_anim;
+    if (fabsf(dc) < ANIM_EPSILON) {
+        if (me->cct_anim != (float)me->cct_target) {
+            me->cct_anim = (float)me->cct_target;
             changed = true;
         }
     } else {
-        me->current_cct += dc * ANIM_ALPHA;
+        me->cct_anim += dc * ANIM_ALPHA;
         changed = true;
     }
 
@@ -142,47 +148,47 @@ static bool step_animation(lightbar_controller *me) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 static void cycle_preset(lightbar_controller *me) {
+    // Find the nearest preset frame
     int closest = 0;
-    float min_dist = fabsf(me->target_cct - k_presets[0]);
+    int min_dist = (int)fabsf((float)(me->cct_target - k_preset_frames[0]));
     for (int i = 1; i < 3; i++) {
-        float d = fabsf(me->target_cct - k_presets[i]);
+        int d = (int)fabsf((float)(me->cct_target - k_preset_frames[i]));
         if (d < min_dist) { min_dist = d; closest = i; }
     }
-    me->target_cct = k_presets[(closest + 1) % 3];
-    ESP_LOGI(TAG, "preset → %.0f K", (double)me->target_cct);
+    // If already at that preset → advance; otherwise snap to it first
+    if (me->cct_target == k_preset_frames[closest]) {
+        closest = (closest + 1) % 3;
+    }
+    me->cct_target = k_preset_frames[closest];
+    ESP_LOGI(TAG, "preset → frame %d", me->cct_target);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// NVS helpers
-// Brightness and CCT are stored as raw uint32 bit-patterns of float values.
+// NVS helpers — brightness and CCT stored as uint8_t frame indices (0–99)
 // ─────────────────────────────────────────────────────────────────────────────
 
 static void nvs_load(lightbar_controller *me) {
-    uint32_t brt_bits = 0, cct_bits = 0;
-    float brt = 0.8f, cct = CCT_NEUTRAL;   // defaults on first boot
+    uint8_t brt_idx = 79;   // default ~80% brightness (frame 79/99)
+    uint8_t cct_idx = 50;   // default neutral CCT (frame 50 ≈ 4000 K)
 
-    if (nvs_get_u32(me->nvs, "brightness", &brt_bits) == ESP_OK)
-        memcpy(&brt, &brt_bits, sizeof(float));
-    if (nvs_get_u32(me->nvs, "cct", &cct_bits) == ESP_OK)
-        memcpy(&cct, &cct_bits, sizeof(float));
+    nvs_get_u8(me->nvs, "brt_idx", &brt_idx);
+    nvs_get_u8(me->nvs, "cct_idx", &cct_idx);
 
-    // target loads saved value; current starts at 0 so power-on fades in
-    me->target_brightness = clampf(brt, 0.05f, 1.0f);
-    me->current_brightness = 0.0f;
-    me->target_cct  = clampf(cct, CCT_MIN, CCT_MAX);
-    me->current_cct = me->target_cct;   // CCT is restored instantly
+    me->brt_target    = brt_idx < BRT_FRAMES ? brt_idx : 79;
+    me->cct_target    = cct_idx < CCT_FRAMES ? cct_idx : 50;
+    me->saved_brt_idx = me->brt_target;
 
-    ESP_LOGI(TAG, "NVS loaded: brightness=%.2f  cct=%.0fK",
-             (double)brt, (double)cct);
+    me->brt_anim = 0.0f;                   // fade in from dark on power-on
+    me->cct_anim = (float)me->cct_target;  // CCT snaps to saved value instantly
+
+    ESP_LOGI(TAG, "NVS loaded: brt_frame=%d  cct_frame=%d",
+             me->brt_target, me->cct_target);
 }
 
-// Save the provided brightness and CCT (call with target values before zeroing them).
-static void nvs_save(lightbar_controller *me, float brt, float cct) {
-    uint32_t brt_bits, cct_bits;
-    memcpy(&brt_bits, &brt, sizeof(float));
-    memcpy(&cct_bits, &cct, sizeof(float));
-    nvs_set_u32(me->nvs, "brightness", brt_bits);
-    nvs_set_u32(me->nvs, "cct",        cct_bits);
+// Save the provided frame indices before zeroing them on power-off.
+static void nvs_save(lightbar_controller *me, int16_t brt_idx, int16_t cct_idx) {
+    nvs_set_u8(me->nvs, "brt_idx", (uint8_t)brt_idx);
+    nvs_set_u8(me->nvs, "cct_idx", (uint8_t)cct_idx);
     nvs_commit(me->nvs);
 }
 
@@ -195,24 +201,45 @@ static lightbar_controller *s_lb = NULL;
 static void espnow_rx_cb(const esp_now_recv_info_t *info,
                          const uint8_t *data, int len)
 {
-    if (!s_lb || len < (int)sizeof(app_pkt_t)) return;
+    if (!s_lb) {
+        ESP_LOGW(TAG, "rx: controller not ready, dropped");
+        return;
+    }
+    if (len < (int)sizeof(app_pkt_t)) {
+        ESP_LOGW(TAG, "rx: short packet (%d bytes), dropped", len);
+        return;
+    }
+    const uint8_t *m = info->src_addr;
+    ESP_LOGI(TAG, "rx: pkt from %02x:%02x:%02x:%02x:%02x:%02x  len=%d",
+             m[0], m[1], m[2], m[3], m[4], m[5], len);
     lightbar_post_espnow_pkt(s_lb, (const app_pkt_t *)data);
 }
+
+#define ESPNOW_CHANNEL 1    /* must match table controller */
 
 static void espnow_receiver_init(void) {
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
-    esp_netif_create_default_wifi_sta();
+    // NOTE: do NOT call esp_netif_create_default_wifi_sta() — we are pure ESP-NOW,
+    // no TCP/IP stack needed. Creating the netif triggers DHCP activity that can
+    // interfere with manual channel locking.
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
     ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_start());
+    ESP_ERROR_CHECK(esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE));
+    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));   /* disable power-save — ESP-NOW needs radio always-on */
+
+    // Verify the channel actually stuck
+    uint8_t primary; wifi_second_chan_t second;
+    esp_wifi_get_channel(&primary, &second);
+    ESP_LOGI(TAG, "WiFi channel confirmed: %d (wanted %d)", primary, ESPNOW_CHANNEL);
 
     ESP_ERROR_CHECK(esp_now_init());
     ESP_ERROR_CHECK(esp_now_register_recv_cb(espnow_rx_cb));
-    ESP_LOGI(TAG, "ESP-NOW receiver ready");
+    ESP_LOGI(TAG, "ESP-NOW receiver ready on channel %d", primary);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -274,6 +301,8 @@ void lightbar_ctor(lightbar_controller *me,
 
     // Store global for ESP-NOW callback
     s_lb = me;
+    ESP_LOGI(TAG, "lightbar constructed — brt=%d cct=%d",
+             me->brt_target, me->cct_target);
 }
 
 void lightbar_init(lightbar_controller *me, const char *task_name) {
@@ -318,19 +347,23 @@ void lightbar_post_espnow_pkt(lightbar_controller *me, const app_pkt_t *pkt) {
 
     switch (pkt->type) {
         case PKT_BRIGHTNESS_EVENT:
+            ESP_LOGI(TAG, "pkt BRIGHTNESS  delta=%d  seq=%u", pkt->knob_delta, pkt->seq);
             e.super.signal = SIG_BRIGHTNESS;
             e.delta = pkt->knob_delta;
             break;
         case PKT_PRESET_EVENT:
+            ESP_LOGI(TAG, "pkt CCT         delta=%d  seq=%u", pkt->knob_delta, pkt->seq);
             e.super.signal = SIG_PRESET;
-            e.delta = pkt->knob_delta;   // non-zero → remote CCT control
+            e.delta = pkt->knob_delta;
             break;
         case PKT_KNOB_BUTTON:
+            ESP_LOGI(TAG, "pkt POWER  seq=%u", pkt->seq);
             e.super.signal = SIG_POWER;
             e.delta = 0;
             break;
         case PKT_HEARTBEAT:
         default:
+            ESP_LOGD(TAG, "pkt type=0x%02x ignored", pkt->type);
             return;
     }
 
@@ -383,8 +416,9 @@ fsm_state lightbar_off_state(fsm *me, fsm_event *e) {
             return STATE_HANDLED;
 
         case SIG_POWER:
-            // Restore brightness from zero (fade-in) — target was saved before power-off
-            controller->current_brightness = 0.0f;
+            // Restore saved brightness target; brt_anim is already ~0 from fade-out
+            ESP_LOGI(TAG, "[off] power on → brt_target=%d", controller->saved_brt_idx);
+            controller->brt_target = controller->saved_brt_idx;
             return TRAN(lightbar_brightness_state);
 
         default:
@@ -401,16 +435,19 @@ fsm_state lightbar_on_state(fsm *me, fsm_event *e) {
     switch (e->signal) {
 
         case SIG_POWER:
-            // Save current targets before starting the fade-out.
-            nvs_save(controller, controller->target_brightness, controller->target_cct);
-            controller->target_brightness = 0.0f;
-            controller->turning_off = true;
+            // Persist current targets before fade-out zeroes brt_target
+            ESP_LOGI(TAG, "[on] power off → saving brt=%d cct=%d",
+                     controller->brt_target, controller->cct_target);
+            nvs_save(controller, controller->brt_target, controller->cct_target);
+            controller->saved_brt_idx = controller->brt_target;
+            controller->brt_target    = 0;
+            controller->turning_off   = true;
             return STATE_HANDLED;   // stay in current sub-state; fade drives TRAN
 
         case SIG_ANIM_TICK:
             step_animation(controller);
-            if (controller->turning_off && controller->current_brightness <= ANIM_BRT_EPSILON) {
-                controller->current_brightness = controller->target_brightness = 0.0f;
+            if (controller->turning_off && controller->brt_anim < ANIM_EPSILON) {
+                controller->brt_anim  = 0.0f;
                 controller->turning_off = false;
                 return TRAN(lightbar_off_state);   // animation complete → power off
             }
@@ -441,8 +478,8 @@ fsm_state lightbar_brightness_state(fsm *me, fsm_event *e) {
             fsm_timer_arm(me, (fsm_event *)&k_tick_evt,
                           TIMER_CH_ANIM, pdMS_TO_TICKS(ANIM_TICK_MS), 0);
             refresh_strip(controller);
-            ESP_LOGI(TAG, "[brightness]  brt=%.2f  cct=%.0fK",
-                     (double)controller->target_brightness, (double)controller->target_cct);
+            ESP_LOGI(TAG, "[brightness]  brt=%d  cct=%d",
+                     controller->brt_target, controller->cct_target);
             return STATE_HANDLED;
 
         case SIG_EXIT:
@@ -452,19 +489,23 @@ fsm_state lightbar_brightness_state(fsm *me, fsm_event *e) {
 
         case SIG_BRIGHTNESS: {
             lightbar_event *le = (lightbar_event *)e;
-            controller->target_brightness = clampf(
-                controller->target_brightness + le->delta * BRIGHTNESS_DELTA_PER_UNIT,
-                0.0f, 1.0f);
+            int16_t v = controller->brt_target + le->delta;
+            if (v < 0) v = 0;
+            if (v >= BRT_FRAMES) v = BRT_FRAMES - 1;
+            controller->brt_target = v;
+            ESP_LOGI(TAG, "[brightness] brt_target=%d", controller->brt_target);
             return STATE_HANDLED;
         }
 
         case SIG_PRESET: {
             lightbar_event *le = (lightbar_event *)e;
             if (le->delta != 0) {
-                // Remote CCT knob → accumulate and switch to preset_state
-                controller->target_cct = clampf(
-                    controller->target_cct + le->delta * CCT_DELTA_PER_UNIT,
-                    CCT_MIN, CCT_MAX);
+                // Remote CCT knob → 1 click = 1 frame; switch to preset_state
+                int16_t v = controller->cct_target + le->delta;
+                if (v < 0) v = 0;
+                if (v >= CCT_FRAMES) v = CCT_FRAMES - 1;
+                controller->cct_target = v;
+                ESP_LOGI(TAG, "[brightness] cct_target=%d → preset mode", controller->cct_target);
                 return TRAN(lightbar_preset_state);
             }
             // delta==0 (local button) → delegate to parent
@@ -486,7 +527,7 @@ fsm_state lightbar_preset_state(fsm *me, fsm_event *e) {
             // Re-arm in case timer was not yet running (e.g. first transition)
             fsm_timer_arm(me, (fsm_event *)&k_tick_evt,
                           TIMER_CH_ANIM, pdMS_TO_TICKS(ANIM_TICK_MS), 0);
-            ESP_LOGI(TAG, "[preset]  cct=%.0fK", (double)controller->target_cct);
+            ESP_LOGI(TAG, "[preset]  cct=%d", controller->cct_target);
             return STATE_HANDLED;
 
         case SIG_EXIT:
@@ -495,10 +536,12 @@ fsm_state lightbar_preset_state(fsm *me, fsm_event *e) {
         case SIG_PRESET: {
             lightbar_event *le = (lightbar_event *)e;
             if (le->delta != 0) {
-                // Remote knob — keep adjusting CCT
-                controller->target_cct = clampf(
-                    controller->target_cct + le->delta * CCT_DELTA_PER_UNIT,
-                    CCT_MIN, CCT_MAX);
+                // Remote CCT knob — keep adjusting in frame units
+                int16_t v = controller->cct_target + le->delta;
+                if (v < 0) v = 0;
+                if (v >= CCT_FRAMES) v = CCT_FRAMES - 1;
+                controller->cct_target = v;
+                ESP_LOGI(TAG, "[preset] cct_target=%d", controller->cct_target);
                 return STATE_HANDLED;
             }
             // Local button → delegate to parent (cycle_preset)
@@ -508,9 +551,11 @@ fsm_state lightbar_preset_state(fsm *me, fsm_event *e) {
         case SIG_BRIGHTNESS: {
             // Remote returned to brightness mode — apply delta and switch back
             lightbar_event *le = (lightbar_event *)e;
-            controller->target_brightness = clampf(
-                controller->target_brightness + le->delta * BRIGHTNESS_DELTA_PER_UNIT,
-                0.0f, 1.0f);
+            int16_t v = controller->brt_target + le->delta;
+            if (v < 0) v = 0;
+            if (v >= BRT_FRAMES) v = BRT_FRAMES - 1;
+            controller->brt_target = v;
+            ESP_LOGI(TAG, "[preset] brt_target=%d → brightness mode", controller->brt_target);
             return TRAN(lightbar_brightness_state);
         }
 

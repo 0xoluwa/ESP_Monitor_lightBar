@@ -6,4 +6,5 @@
 #define KNOB_DATA_PIN 4
 #define KNOB_BUTTON_PIN 2
 
-#define STRIP_DATA_PIN
+#define STRIP_DATA_PIN  5
+#define CTRL_NUM_LEDS   1     /* number of WS2812B LEDs on the controller strip */

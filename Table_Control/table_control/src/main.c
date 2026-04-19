@@ -5,94 +5,101 @@
 #include "esp_timer.h"
 #include "controller.h"
 #include "connection_setup.h"
+#include "timer_evt.h"
 #include "driver/gpio.h"
+#include "esp_log.h"
 
-#define TRIGGER_FREQUENCY_MS 10
-#define LONG_PRESS_TIME  2000000   // 3 seconds in microseconds
-#define SHORT_PRESS_TIME   50000   // 50 ms in microseconds
+static const char *TAG = "main";
 
-static TimerHandle_t knob_timer_handle;
+#define KNOB_POLL_MS     5        // poll encoder every 10 ms
+#define LONG_PRESS_US    2000000    // 2 s in microseconds
+#define SHORT_PRESS_US     50000    // 50 ms debounce floor
+
+static TimerHandle_t    knob_timer_handle;
 static encoder_handle_t knob_handle;
-static controller device;
+static controller       device;
 
-#define POST_INTERVAL_MS 500     // Desired reporting interval
-#define TICKS_TO_WAIT (POST_INTERVAL_MS / TRIGGER_FREQUENCY_MS)
+// ─── Encoder poll timer ───────────────────────────────────────────────────────
+// Runs every 10 ms. Sends any accumulated delta immediately — no batching.
+// 1 encoder detent = 1 frame on the light bar with negligible latency.
 
 static void knob_cb(TimerHandle_t xTimer) {
-    static uint32_t tick_counter = 0;
-    
     encoder_handle_tick(&knob_handle);
-    tick_counter++;
-
-    if (tick_counter >= TICKS_TO_WAIT) {
-        int16_t delta = encoder_read_and_clear(&knob_handle);
-
-        if (delta != 0) {
-            post_knob_count(&device, delta);
-        }
-
-        tick_counter = 0; // Reset the window
+    int16_t delta = (int16_t)encoder_read_and_clear(&knob_handle);
+    if (delta != 0) {
+        post_knob_count(&device, delta);
     }
 }
 
-static void knob_setup(){
+static void knob_setup(void) {
     encoder_fsm_ctor(&knob_handle, KNOB_CLK_PIN, KNOB_DATA_PIN);
     encoder_fsm_init(&knob_handle);
 
-    TickType_t frequency = pdMS_TO_TICKS(TRIGGER_FREQUENCY_MS);
-    knob_timer_handle = xTimerCreate("knob", frequency, pdTRUE, NULL, knob_cb);
+    knob_timer_handle = xTimerCreate("knob",
+                                     pdMS_TO_TICKS(KNOB_POLL_MS),
+                                     pdTRUE, NULL, knob_cb);
     xTimerStart(knob_timer_handle, 0);
 }
 
-static void device_setup(){
-    controller_ctor(&device);
-    controller_init(&device, "main_device");
-}
+// ─── Button ISR ───────────────────────────────────────────────────────────────
+// Measures press duration on release edge.
+// SHORT_PRESS → toggle brightness/preset mode.
+// LONG_PRESS  → send power packet to light bar.
 
-static void IRAM_ATTR knob_button_isr(void* arg) {
-    uint64_t current_time = esp_timer_get_time();
-    static uint64_t press_start_time = 0;
-    
-    int level = gpio_get_level((gpio_num_t)KNOB_BUTTON_PIN);
+static void IRAM_ATTR knob_button_isr(void *arg) {
+    static int64_t press_start_us = 0;
+    int64_t now   = esp_timer_get_time();
+    int     level = gpio_get_level((gpio_num_t)KNOB_BUTTON_PIN);
 
-    if (level == 0) { 
-        press_start_time = current_time;
+    if (level == 0) {
+        // Falling edge — button pressed
+        press_start_us = now;
     } else {
-        if (press_start_time == 0) return; // Ignore release if we missed the press
+        // Rising edge — button released
+        if (press_start_us == 0) return;    // missed the press, ignore
+        int64_t duration = now - press_start_us;
+        press_start_us = 0;
 
-        uint64_t duration = current_time - press_start_time;
-        press_start_time = 0; // Always reset so stale time can't leak into the next event
-
-        if (duration >= LONG_PRESS_TIME) {
+        if (duration >= LONG_PRESS_US)
             post_knob_button(&device, LONG_PRESS);
-        } else if (duration >= SHORT_PRESS_TIME) {
+        else if (duration >= SHORT_PRESS_US)
             post_knob_button(&device, SHORT_PRESS);
-        }
+        // else: noise / glitch shorter than debounce floor — discard
     }
 }
 
-static void knob_button_setup() {
-    gpio_config_t knob_button_gpio_config = {
+static void knob_button_setup(void) {
+    gpio_config_t cfg = {
         .pin_bit_mask = (1ULL << KNOB_BUTTON_PIN),
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .mode         = GPIO_MODE_INPUT,
+        .pull_up_en   = GPIO_PULLUP_ENABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_ANYEDGE // Triggers when button is pressed (to High)
+        .intr_type    = GPIO_INTR_ANYEDGE,
     };
-
-    gpio_config(&knob_button_gpio_config);
-
-    // Install ISR service only if not already installed
+    gpio_config(&cfg);
     ESP_ERROR_CHECK(gpio_install_isr_service(0));
-    
-
-    // Add the handler for this specific pin
     gpio_isr_handler_add((gpio_num_t)KNOB_BUTTON_PIN, knob_button_isr, NULL);
 }
 
-void app_main() {
-    espnow_init();      // initialize WiFi + ESP-NOW before any task calls send_packet
-    device_setup();
+// ─── Entry point ──────────────────────────────────────────────────────────────
+
+void app_main(void) {
+    ESP_LOGI(TAG, "=== table controller booting ===");
+
+    // 1. Start the 1 ms tick that drives all fsm_time_event timers
+    fsm_tick_init(1000);
+    ESP_LOGI(TAG, "tick timer started (1 ms)");
+
+    // 2. Bring up WiFi + ESP-NOW before the FSM task can call send_packet
+    espnow_init();
+
+    // 3. Construct and start the controller FSM
+    controller_ctor(&device);
+    controller_init(&device, "controller");
+
+    // 4. Start polling the rotary encoder
     knob_setup();
+
+    // 5. Install button ISR
     knob_button_setup();
 }

@@ -4,6 +4,7 @@
 #include "fsm.h"
 #include "timer_evt.h"
 #include "driver/gpio.h"
+#include "led_strip.h"
 
 
 #define QUEUE_DEPTH         20
@@ -34,9 +35,8 @@ enum controller_signal : uint8_t {
     SIG_KNOB,
     AWAKE_SIG,
     SLEEP_SIG,
-    IDLE_SIG,
-    CONNECTED_SIG,
     DISCONNECTED_SIG,
+    IDLE_SIG,
     TIMEOUT_SIG,
     TX_DONE_SIG,
     SIG_MAX
@@ -71,6 +71,8 @@ struct CONTROLLER{
         gpio_num_t strip_data_pin;
         gpio_num_t knob_btn_pin;
     } pin;
+
+    led_strip_handle_t strip;
 
     fsm_time_event  conn_timer;   /* connection retry / timeout timer    — posts TIMEOUT_SIG */
     fsm_time_event  idle_timer;   /* inactivity → deep sleep timer       — posts SLEEP_SIG   */

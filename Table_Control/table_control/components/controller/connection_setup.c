@@ -11,12 +11,19 @@
 
 #define TAG "connection"
 
-// TODO: replace with real lightbar MAC before production
-static const uint8_t LIGHTBAR_MAC[ESP_NOW_ETH_ALEN] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+static const uint8_t LIGHTBAR_MAC[ESP_NOW_ETH_ALEN] = {0xE8, 0xF6, 0x0A, 0x13, 0x75, 0x3C};
 
 uint8_t s_seq = 0;
 
 static QueueHandle_t s_send_queue;
+
+static void send_cb(const uint8_t *mac, esp_now_send_status_t status) {
+    if (status == ESP_NOW_SEND_SUCCESS) {
+        ESP_LOGI(TAG, "send ACK ✓");
+    } else {
+        ESP_LOGW(TAG, "send FAIL — lightbar not ACKing (wrong channel or not running?)");
+    }
+}
 
 static void sender_task(void *pv){
     app_pkt_t pkt;
@@ -44,11 +51,13 @@ void espnow_init(void){
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_start());
     ESP_ERROR_CHECK(esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE));
+    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));   /* disable power-save — ESP-NOW needs radio always-on */
 
     ESP_ERROR_CHECK(esp_now_init());
+    ESP_ERROR_CHECK(esp_now_register_send_cb(send_cb));
 
     esp_now_peer_info_t peer = {
-        .channel = ESPNOW_CHANNEL,
+        .channel = 0,       // 0 = use current WiFi channel (channel 1 set above)
         .encrypt = false,
         .ifidx   = ESP_IF_WIFI_STA
     };

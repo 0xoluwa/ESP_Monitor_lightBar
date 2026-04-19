@@ -7,7 +7,13 @@
       "Bash(python -c \"import idf_component_manager; print\\(idf_component_manager.__file__\\)\")",
       "Bash(python -m idf_component_manager.prepare_components)",
       "Bash(\"/c/Users/orell/.platformio/penv/.espidf-5.5.0/Scripts/python.exe\" --version)",
-      "Bash(\"/c/Users/orell/.platformio/penv/.espidf-5.5.0/Scripts/python.exe\" -c \"import pip\")"
+      "Bash(\"/c/Users/orell/.platformio/penv/.espidf-5.5.0/Scripts/python.exe\" -c \"import pip\")",
+      "Bash(pio run:*)",
+      "Bash(find /Users/sulaimanoreoluwa/Documents/PlatformIO/Projects/ESP_Monitor_lightBar/Table_Control/table_control/.pio/build -name *.o)",
+      "Bash(find /Users/sulaimanoreoluwa/Documents/PlatformIO/Projects/ESP_Monitor_lightBar/Table_Control/table_control/.pio/build -name lib*.a)",
+      "Bash(find /Users/sulaimanoreoluwa/Documents/PlatformIO/Projects/ESP_Monitor_lightBar/Table_Control/table_control/.pio/build -name libfsm* -o -name timer_evt*)",
+      "Bash(riscv32-esp-elf-nm /Users/sulaimanoreoluwa/Documents/PlatformIO/Projects/ESP_Monitor_lightBar/Table_Control/table_control/.pio/build/seeed_xiao_esp32c3/esp-idf/fsm/libfsm.a)",
+      "Bash(~/.platformio/packages/toolchain-riscv32-esp/bin/riscv32-esp-elf-nm \"/Users/sulaimanoreoluwa/Documents/PlatformIO/Projects/ESP_Monitor_lightBar/Table_Control/table_control/.pio/build/seeed_xiao_esp32c3/esp-idf/fsm/libfsm.a\")"
     ]
   }
 }

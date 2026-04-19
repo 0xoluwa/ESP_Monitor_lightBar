@@ -28,24 +28,24 @@ typedef struct __attribute__((packed)) {
 // ─── LED configuration ────────────────────────────────────────────────────────
 #define LIGHTBAR_NUM_LEDS   76
 
-// ─── Color temperature range and presets (Kelvin) ────────────────────────────
+// ─── Color temperature range (Kelvin) ─────────────────────────────────────────
 #define CCT_MIN      1500.0f
-#define CCT_MAX      7500.0f
-#define CCT_WARM     2700.0f    // preset 0
-#define CCT_NEUTRAL  4000.0f    // preset 1
-#define CCT_COOL     6500.0f    // preset 2
+#define CCT_MAX      6500.0f
+
+// ─── Discrete frame counts ────────────────────────────────────────────────────
+// 100 frames for both brightness and CCT.  Each encoder click = 1 frame.
+// CCT frame 0 = CCT_MIN (1500 K), frame 99 = CCT_MAX (6500 K).
+// Brightness frame 0 = off, frame 99 = full brightness.
+#define CCT_FRAMES   100
+#define BRT_FRAMES   100
 
 // ─── Animation ───────────────────────────────────────────────────────────────
-// NOTE: FreeRTOS default tick rate is 100 Hz → pdMS_TO_TICKS(20) = 2 ticks = 20 ms.
-// For tighter 60 Hz, set CONFIG_FREERTOS_HZ=1000 in sdkconfig.
+// Exponential smoothing in *frame units* (0–99), sampled at 50 Hz.
+// alpha = 0.10 → max 99-frame change settles within 0.5 frame in ~1 s:
+//   99 * (0.90)^n < 0.5  →  n ≈ 50 steps = 1.0 s at 50 Hz.
 #define ANIM_TICK_MS        20          // ~50 Hz, safe with default 100 Hz FreeRTOS
-#define ANIM_ALPHA          0.06f       // exponential smoothing; ~1.5 s settle at 50 Hz
-#define ANIM_BRT_EPSILON    0.002f      // brightness snap threshold (< 0.2% of full scale)
-#define ANIM_CCT_EPSILON    1.0f        // CCT snap threshold (1 K)
-
-// ─── Remote scaling ───────────────────────────────────────────────────────────
-#define BRIGHTNESS_DELTA_PER_UNIT   0.01f   // 1 % of full scale per encoder click
-#define CCT_DELTA_PER_UNIT          50.0f   // 50 K per encoder click
+#define ANIM_ALPHA          0.10f       // exponential smoothing factor
+#define ANIM_EPSILON        0.5f        // snap threshold in frame units (shared brt + CCT)
 
 // ─── FSM queue depth ─────────────────────────────────────────────────────────
 #define LIGHTBAR_QUEUE_DEPTH  50
@@ -89,11 +89,14 @@ struct LIGHTBAR_CONTROLLER {
 
     led_strip_handle_t strip;
 
-    // Smooth animation: current values track target via exponential smoothing
-    float current_brightness;   // 0.0 – 1.0  (what is shown right now)
-    float target_brightness;    // 0.0 – 1.0  (where we are heading)
-    float current_cct;          // CCT_MIN – CCT_MAX K
-    float target_cct;
+    // Discrete frame targets (integer, 0–99).  Each encoder tick moves by 1 frame.
+    int16_t brt_target;         // brightness target frame (0 = off, 99 = full)
+    int16_t cct_target;         // CCT target frame (0 = 1500 K warm, 99 = 6500 K cool)
+    int16_t saved_brt_idx;      // brightness preserved across power-off / power-on
+
+    // Smooth animation state (float frame units, driven toward *_target each tick)
+    float brt_anim;             // 0.0 – 99.0  (what the strip shows right now)
+    float cct_anim;             // 0.0 – 99.0
 
     // Set true when powering off so animation drives to off_state on completion
     bool turning_off;
@@ -117,8 +120,8 @@ void lightbar_ctor(lightbar_controller *me,
 void lightbar_init(lightbar_controller *me, const char *task_name);
 
 // Call from GPIO ISRs — debounce handled internally (20 ms ISR timestamp).
-void IRAM_ATTR lightbar_post_power_isr(lightbar_controller *me);
-void IRAM_ATTR lightbar_post_preset_isr(lightbar_controller *me);
+void lightbar_post_power_isr(lightbar_controller *me);
+void lightbar_post_preset_isr(lightbar_controller *me);
 
 // Call from the ESP-NOW receive callback (task context, not ISR).
 void lightbar_post_espnow_pkt(lightbar_controller *me, const app_pkt_t *pkt);

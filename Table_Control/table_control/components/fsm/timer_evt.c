@@ -1,14 +1,6 @@
 #include "timer_evt.h"
 #include "esp_timer.h"
 
-struct fsm_time_event_{
-    fsm_event    super;          /* IS-A fsm_event — must be first */
-    fsm_time_event *next;        /* intrusive linked list of armed timers */
-    void            *state_machine; /* owning FSM to post to on expiry */
-    uint32_t         down_counter;  /* ticks remaining */
-    uint32_t         interval;      /* reload value: 0 = one-shot, >0 = periodic */
-};
-
 /* global head of the armed timer linked list */
 fsm_time_event *time_event_list_head = NULL;
 

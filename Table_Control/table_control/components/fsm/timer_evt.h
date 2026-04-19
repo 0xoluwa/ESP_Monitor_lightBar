@@ -6,6 +6,14 @@
 
 typedef struct fsm_time_event_ fsm_time_event;
 
+struct fsm_time_event_ {
+    fsm_event       super;          /* IS-A fsm_event — must be first        */
+    fsm_time_event *next;           /* intrusive linked list of armed timers  */
+    void           *state_machine;  /* owning FSM to post to on expiry        */
+    uint32_t        down_counter;   /* ticks remaining                        */
+    uint32_t        interval;       /* 0 = one-shot, >0 = periodic reload     */
+};
+
 extern fsm_time_event *time_event_list_head;
 
 void fsm_time_event_ctor (fsm_time_event *me, fsm *owner, uint8_t signal);
