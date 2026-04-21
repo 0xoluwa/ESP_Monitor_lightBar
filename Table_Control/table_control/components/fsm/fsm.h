@@ -2,8 +2,9 @@
 #define __FSM_H__
 
 #include "fsm_events.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
+#include "fsm_port.h"
+
+
 
 
 typedef enum : uint8_t{
@@ -22,8 +23,8 @@ typedef fsm_state (*state_handler)(fsm *me, fsm_event *event);
 
 struct FSM{
     state_handler state;
-    QueueHandle_t queue_;
-    TaskHandle_t  task_;
+    FSM_QUEUE_HANDLE queue_;
+    FSM_TASK_HANDLE  task_;
     uint16_t event_structure_size_;
 };
 
@@ -52,12 +53,8 @@ extern fsm_event RESERVED_EVENT[];
 
 void fsm_ctor(fsm *me, uint8_t queue_depth, uint16_t event_size);
 void fsm_init(fsm *me, const char * task_name, state_handler entry_function);
-BaseType_t fsm_post(fsm *me, fsm_event const *event);
-BaseType_t fsm_post_nonblock(fsm *me, fsm_event const *event);
-BaseType_t fsm_post_from_isr(fsm *me, fsm_event const *event);
+bool fsm_post(fsm *me, fsm_event const *event);
 void fsm_dispatch(void *pv);
-
-
 
 
 #endif

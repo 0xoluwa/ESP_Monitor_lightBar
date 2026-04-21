@@ -15,6 +15,17 @@ typedef enum : uint8_t {
     LONG_PRESS
 } button_duration;
 
+typedef enum {
+    RED_LED,
+    BLUE_LED,
+    GREEN_LED
+} active_led;
+
+typedef enum{
+    POWER_DOWN,
+    POWER_ON
+} led_operation;
+
 typedef enum{
     BRIGTHNESS = 0,
     COLOR_TEMP
@@ -47,17 +58,20 @@ typedef struct CONTROLLER controller;
 void controller_ctor(controller * me);
 void controller_init(controller * me, const char* controller_name);
 
+fsm_state entry_handler (controller *me, fsm_event *event);
+fsm_state connecting_state(controller * me, fsm_event * event);
+
 fsm_state awake_state(controller * me, fsm_event * event);
 fsm_state sleeping_state(controller * me, fsm_event * event);
 fsm_state idle_state(controller * me, fsm_event * event);
 fsm_state tx_state(controller *me, fsm_event * event);
-fsm_state connecting_state(controller * me, fsm_event * event);
+
 
 fsm_state top_main_state(controller *me, fsm_event *event);
 fsm_state brightness_state(controller *me, fsm_event *event);
 fsm_state preset_state(controller *me, fsm_event *event);
 
-fsm_state entry_handler (controller *me, fsm_event *event);
+
 
 void post_knob_count(controller * me, int knob_count);
 void post_knob_button(controller *me, button_duration press_duration);
@@ -65,15 +79,8 @@ void post_knob_button(controller *me, button_duration press_duration);
 struct CONTROLLER{
     fsm super;
 
-    struct {
-        gpio_num_t knob_clk_pin;
-        gpio_num_t knob_data_pin;
-        gpio_num_t strip_data_pin;
-        gpio_num_t knob_btn_pin;
-    } pin;
-
+    gpio_num_t strip_data_pin;
     led_strip_handle_t strip;
-
     fsm_time_event  conn_timer;   /* connection retry / timeout timer    — posts TIMEOUT_SIG */
     fsm_time_event  idle_timer;   /* inactivity → deep sleep timer       — posts SLEEP_SIG   */
     state_handler   active_mode_; /* last active brightness/preset state — restored on re-entry */

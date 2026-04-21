@@ -4,9 +4,6 @@
 /* global head of the armed timer linked list */
 fsm_time_event *time_event_list_head = NULL;
 
-/* spinlock for dual-core safety (ESP32 has two cores) */
-static portMUX_TYPE time_evt_mux = portMUX_INITIALIZER_UNLOCKED;
-
 static esp_timer_handle_t tick_timer_ = NULL;
 
 static void tick_isr_cb(void *arg){
@@ -20,7 +17,7 @@ static void tick_isr_cb(void *arg){
  * Uses ESP_TIMER_TASK dispatch — callback runs in the esp_timer service task.*
  * fsm_tick uses fsm_post_nonblock (0 timeout) so it never blocks that task.  */
 void fsm_tick_init(uint64_t period_us){
-    configASSERT(tick_timer_ == NULL);  /* guard against double-init */
+    FSM_ASSERT(tick_timer_ == NULL);  /* guard against double-init */
 
     const esp_timer_create_args_t args = {
         .callback        = tick_isr_cb,
@@ -47,8 +44,8 @@ void fsm_tick_deinit(void){
 /* Binds the time event to its owning FSM and sets the signal it will carry.  *
  * Call once at startup before arming.                                        */
 void fsm_time_event_ctor(fsm_time_event *me, fsm *owner, uint8_t signal){
-    configASSERT(me);
-    configASSERT(owner);
+    FSM_ASSERT(me);
+    FSM_ASSERT(owner);
     me->super.signal  = signal;
     me->state_machine = owner;
     me->next          = NULL;
@@ -60,15 +57,15 @@ void fsm_time_event_ctor(fsm_time_event *me, fsm *owner, uint8_t signal){
 /* --- arm ------------------------------------------------------------------ */
 /* nTicks must be >= 1.  interval = 0 → one-shot, interval > 0 → periodic.   */
 void fsm_time_event_arm(fsm_time_event *me, uint32_t nTicks, uint32_t interval){
-    configASSERT(nTicks > 0U);          /* guard against wrap-around bug */
+    FSM_ASSERT(nTicks > 0U);          /* guard against wrap-around bug */
 
-    portENTER_CRITICAL(&time_evt_mux);
+    FSM_DISABLE_INTERRUPT;
     me->down_counter  = nTicks;
     me->interval      = interval;
     /* prepend to the armed list */
     me->next          = time_event_list_head;
     time_event_list_head = me;
-    portEXIT_CRITICAL(&time_evt_mux);
+    FSM_ENABLE_INTERRUPT;
 }
 
 
@@ -78,9 +75,9 @@ void fsm_time_event_arm(fsm_time_event *me, uint32_t nTicks, uint32_t interval){
  * back.  interval is preserved from the original arm call.                   *
  * Returns true if the timer was already running, false if it was re-inserted.*/
 bool fsm_time_event_rearm(fsm_time_event *me, uint32_t nTicks){
-    configASSERT(nTicks > 0U);
+    FSM_ASSERT(nTicks > 0U);
 
-    portENTER_CRITICAL(&time_evt_mux);
+    FSM_DISABLE_INTERRUPT;
 
     /* check if already in the list */
     bool was_armed = false;
@@ -98,7 +95,7 @@ bool fsm_time_event_rearm(fsm_time_event *me, uint32_t nTicks){
         time_event_list_head = me;
     }
 
-    portEXIT_CRITICAL(&time_evt_mux);
+    FSM_ENABLE_INTERRUPT;
     return was_armed;
 }
 
@@ -106,7 +103,7 @@ bool fsm_time_event_rearm(fsm_time_event *me, uint32_t nTicks){
 /* --- disarm --------------------------------------------------------------- */
 /* Removes the time event from the armed list.  Safe to call if not armed.   */
 void fsm_time_event_disarm(fsm_time_event *me){
-    portENTER_CRITICAL(&time_evt_mux);
+    FSM_DISABLE_INTERRUPT;
 
     fsm_time_event **curr = &time_event_list_head;
     while (*curr != NULL) {
@@ -118,7 +115,7 @@ void fsm_time_event_disarm(fsm_time_event *me){
         curr = &(*curr)->next;
     }
 
-    portEXIT_CRITICAL(&time_evt_mux);
+    FSM_ENABLE_INTERRUPT;
 }
 
 
@@ -133,7 +130,7 @@ void fsm_tick(void){
             if (current_time_event_->interval != 0U) {
                 current_time_event_->down_counter = current_time_event_->interval; /* reload periodic */
             }
-            fsm_post_nonblock((fsm *)current_time_event_->state_machine,
+            fsm_post((fsm *)current_time_event_->state_machine,
                              (fsm_event *)current_time_event_);
         }
         current_time_event_ = current_time_event_->next;

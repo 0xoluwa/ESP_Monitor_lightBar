@@ -11,7 +11,7 @@
 
 #define TAG "connection"
 
-static const uint8_t LIGHTBAR_MAC[ESP_NOW_ETH_ALEN] = {0xE8, 0xF6, 0x0A, 0x13, 0x75, 0x3C};
+static const uint8_t LIGHTBAR_MAC[ESP_NOW_ETH_ALEN] = {0xB4, 0xBF, 0xE9, 0x15, 0xA6, 0xD4};
 
 uint8_t s_seq = 0;
 
