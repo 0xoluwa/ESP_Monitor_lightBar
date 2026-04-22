@@ -18,7 +18,7 @@ static const char *TAG = "main";
 
 static TimerHandle_t    knob_timer_handle;
 static encoder_handle_t knob_handle;
-static controller       device;
+controller       device;
 
 // ─── Encoder poll timer ───────────────────────────────────────────────────────
 // Runs every 10 ms. Sends any accumulated delta immediately — no batching.

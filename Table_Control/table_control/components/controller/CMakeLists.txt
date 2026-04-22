@@ -7,6 +7,7 @@ idf_component_register(
         led_strip
         esp_driver_gpio
         esp_driver_rmt
+        esp_driver_ledc
         nvs_flash
         esp_wifi
         esp_netif

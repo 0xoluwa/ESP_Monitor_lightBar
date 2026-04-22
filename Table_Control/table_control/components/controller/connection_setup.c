@@ -8,19 +8,34 @@
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include <string.h>
+#include "controller.h"
 
 #define TAG "connection"
 
 static const uint8_t LIGHTBAR_MAC[ESP_NOW_ETH_ALEN] = {0xB4, 0xBF, 0xE9, 0x15, 0xA6, 0xD4};
+
+extern controller device;
 
 uint8_t s_seq = 0;
 
 static QueueHandle_t s_send_queue;
 
 static void send_cb(const uint8_t *mac, esp_now_send_status_t status) {
+    (void) mac;
     if (status == ESP_NOW_SEND_SUCCESS) {
+        fsm_event evt = {
+            .signal = CONNECTED_SIG 
+        };
+
+        fsm_post((fsm *) &device, &evt);
+
         ESP_LOGI(TAG, "send ACK ✓");
     } else {
+        fsm_event evt = {
+            .signal = DISCONNECTED_SIG 
+        };
+
+        fsm_post((fsm *) &device, &evt);
         ESP_LOGW(TAG, "send FAIL — lightbar not ACKing (wrong channel or not running?)");
     }
 }
@@ -66,7 +81,7 @@ void espnow_init(void){
 
     s_send_queue = xQueueCreate(8, sizeof(app_pkt_t));
     configASSERT(s_send_queue);
-    assert(xTaskCreate(sender_task, "espnow_sender", 4096, NULL, 1, NULL));
+    configASSERT(xTaskCreate(sender_task, "espnow_sender", 4096, NULL, 1, NULL));
 }
 
 void send_packet(const app_pkt_t *pkt){

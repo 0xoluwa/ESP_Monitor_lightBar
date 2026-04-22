@@ -13,7 +13,8 @@
       "Bash(find /Users/sulaimanoreoluwa/Documents/PlatformIO/Projects/ESP_Monitor_lightBar/Table_Control/table_control/.pio/build -name lib*.a)",
       "Bash(find /Users/sulaimanoreoluwa/Documents/PlatformIO/Projects/ESP_Monitor_lightBar/Table_Control/table_control/.pio/build -name libfsm* -o -name timer_evt*)",
       "Bash(riscv32-esp-elf-nm /Users/sulaimanoreoluwa/Documents/PlatformIO/Projects/ESP_Monitor_lightBar/Table_Control/table_control/.pio/build/seeed_xiao_esp32c3/esp-idf/fsm/libfsm.a)",
-      "Bash(~/.platformio/packages/toolchain-riscv32-esp/bin/riscv32-esp-elf-nm \"/Users/sulaimanoreoluwa/Documents/PlatformIO/Projects/ESP_Monitor_lightBar/Table_Control/table_control/.pio/build/seeed_xiao_esp32c3/esp-idf/fsm/libfsm.a\")"
+      "Bash(~/.platformio/packages/toolchain-riscv32-esp/bin/riscv32-esp-elf-nm \"/Users/sulaimanoreoluwa/Documents/PlatformIO/Projects/ESP_Monitor_lightBar/Table_Control/table_control/.pio/build/seeed_xiao_esp32c3/esp-idf/fsm/libfsm.a\")",
+      "Bash(find /Users/sulaimanoreoluwa/Documents/PlatformIO/Projects/ESP_Monitor_lightBar/Light_BAR/light_bar -not -path */.* -not -path */.pio/* -type f)"
     ]
   }
 }
