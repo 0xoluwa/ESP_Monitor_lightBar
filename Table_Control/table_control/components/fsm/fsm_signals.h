@@ -3,7 +3,7 @@
 
 #include "stdint.h"
 
-enum fsm_signal : uint8_t {
+enum fsm_signal {
     SIG_ENTRY = 0,   
     SIG_EXIT,         
     SIG_INIT,

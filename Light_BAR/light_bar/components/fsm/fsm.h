@@ -54,7 +54,7 @@ extern fsm_event RESERVED_EVENT[];
 void fsm_ctor(fsm *me, uint8_t queue_depth, uint16_t event_size);
 void fsm_init(fsm *me, const char * task_name, state_handler entry_function);
 bool fsm_post(fsm *me, fsm_event const *event);
-bool fsm_post_from_isr(fsm *me, fsm_event const * event);
+void fsm_post_from_isr(fsm *me, fsm_event const * event);
 void fsm_dispatch(void *pv);
 
 

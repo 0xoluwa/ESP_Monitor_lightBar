@@ -100,7 +100,7 @@ void post_knob_button(controller *me, button_duration press_duration){
         .super.signal         = SIG_KNOB_BTN_PRESS,
         .knob_button_duration = press_duration,
     };
-    fsm_post((fsm *)me, (fsm_event *)&evt);
+    fsm_post_from_isr((fsm *)me, (fsm_event *)&evt);
 }
 
 
@@ -113,6 +113,7 @@ void controller_ctor(controller *me){
 
 void controller_init(controller *me, const char *controller_name){
     rgb_led_init();
+    espnow_init(me);
     ESP_LOGI(TAG, "starting FSM task: %s", controller_name);
     fsm_init((fsm *)me, controller_name, (state_handler)entry_handler);
 }

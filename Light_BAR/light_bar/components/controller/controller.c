@@ -48,8 +48,11 @@ fsm_state lightbar_entry_state      (lightbar_controller *me, fsm_event *e){
 fsm_state lightbar_on_state(lightbar_controller *me, fsm_event *e){
     switch (e->signal){
         case SIG_ENTRY: {
-            uint8_t brt_idx = 79;  
-            uint8_t cct_idx = 50;  
+            me->brt_curr_frame = 0;   // force animation to run from dark
+            me->cct_cur_frame  = 0;
+
+            uint8_t brt_idx = BRIGHTNESS_FRAME_DEFAULT;  
+            uint8_t cct_idx = COLOR_TEMP_FRAME_DEFAULT;  
 
             nvs_get_u8(me->nvs, "brt_idx", &brt_idx);
             nvs_get_u8(me->nvs, "cct_idx", &cct_idx);
@@ -57,8 +60,8 @@ fsm_state lightbar_on_state(lightbar_controller *me, fsm_event *e){
             me->brt_target_frame = brt_idx;
             me->cct_target_frame = cct_idx;
 
-            if (me->cct_target_frame > 64) me->cct_target_frame = 64;
-            if (me->brt_target_frame > 100) me->brt_target_frame = 100;
+            if (me->cct_target_frame > MAX_COLOR_TEMP_FRAME) me->cct_target_frame = MAX_COLOR_TEMP_FRAME;
+            if (me->brt_target_frame > MAX_BRIGHTNESS_FRAME) me->brt_target_frame = MAX_BRIGHTNESS_FRAME;
 
             lightbar_event anim_event = {
                 .super.signal = SIG_ANIM_TICK
@@ -82,8 +85,8 @@ fsm_state lightbar_on_state(lightbar_controller *me, fsm_event *e){
         
         case SIG_COLOR_TEMP:    {
             me->cct_target_frame += ((lightbar_event *) e)->delta;
-            if (me->cct_target_frame > 64) me->cct_target_frame = 64;
-            else if (me->cct_target_frame < 0) me->cct_target_frame = 0;
+            if (me->cct_target_frame > MAX_COLOR_TEMP_FRAME) me->cct_target_frame = MAX_COLOR_TEMP_FRAME;
+            else if (me->cct_target_frame < MIN_COLOR_TEMP_FRAME) me->cct_target_frame = MIN_COLOR_TEMP_FRAME;
 
             lightbar_event anim_event = {
                 .super.signal = SIG_ANIM_TICK
@@ -113,8 +116,8 @@ fsm_state lightbar_on_state(lightbar_controller *me, fsm_event *e){
 
         case SIG_BRIGHTNESS:{
             me->brt_target_frame += ((lightbar_event *) e)->delta;
-            if (me->brt_target_frame > 100) me->brt_target_frame = 100;
-            else if (me->brt_target_frame < 0) me->brt_target_frame = 0;
+            if (me->brt_target_frame > MAX_BRIGHTNESS_FRAME) me->brt_target_frame = MAX_BRIGHTNESS_FRAME;
+            else if (me->brt_target_frame < MIN_BRIGHTNESS_FRAME) me->brt_target_frame = MIN_BRIGHTNESS_FRAME;
             
             lightbar_event anim_event = {
                 .super.signal = SIG_ANIM_TICK
@@ -224,7 +227,7 @@ void led_strip_set_color_temp(lightbar_controller *me, uint8_t kelvin_index)
     }
 }
 
-void post_power_button_isr(lightbar_controller *me){
+IRAM_ATTR void post_power_button_isr(lightbar_controller *me){
     lightbar_event evt = {
         .super.signal = SIG_POWER
     };
@@ -240,7 +243,7 @@ void post_power_button(lightbar_controller *me){
     fsm_post((fsm *) me, (fsm_event *) &evt);
 }
 
-void post_color_temp_button(lightbar_controller *me){
+IRAM_ATTR void post_color_temp_button(lightbar_controller *me){
     lightbar_event evt = {
         .super.signal = SIG_COLOR_TEMP_PRESET
     };

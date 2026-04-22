@@ -8,13 +8,12 @@
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include <string.h>
-#include "controller.h"
 
 #define TAG "connection"
 
 static const uint8_t LIGHTBAR_MAC[ESP_NOW_ETH_ALEN] = {0xB4, 0xBF, 0xE9, 0x15, 0xA6, 0xD4};
 
-extern controller device;
+static controller * user_device = NULL;
 
 uint8_t s_seq = 0;
 
@@ -23,19 +22,19 @@ static QueueHandle_t s_send_queue;
 static void send_cb(const uint8_t *mac, esp_now_send_status_t status) {
     (void) mac;
     if (status == ESP_NOW_SEND_SUCCESS) {
-        fsm_event evt = {
-            .signal = CONNECTED_SIG 
+        controller_event evt = {
+            .super.signal = CONNECTED_SIG 
         };
 
-        fsm_post((fsm *) &device, &evt);
+        fsm_post((fsm *) user_device, (fsm_event *) &evt);
 
         ESP_LOGI(TAG, "send ACK ✓");
     } else {
-        fsm_event evt = {
-            .signal = DISCONNECTED_SIG 
+        controller_event evt = {
+            .super.signal = DISCONNECTED_SIG 
         };
 
-        fsm_post((fsm *) &device, &evt);
+        fsm_post((fsm *) user_device, (fsm_event *) &evt);
         ESP_LOGW(TAG, "send FAIL — lightbar not ACKing (wrong channel or not running?)");
     }
 }
@@ -51,7 +50,8 @@ static void sender_task(void *pv){
     }
 }
 
-void espnow_init(void){
+void espnow_init(controller *me){
+    user_device = me;
     esp_err_t ret = nvs_flash_init();
     if(ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND){
         ESP_ERROR_CHECK(nvs_flash_erase());

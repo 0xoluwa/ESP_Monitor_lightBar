@@ -11,7 +11,7 @@
 
 static const char *TAG = "main";
 
-#define KNOB_POLL_MS     2      // quadrature sample interval — min 10 ms at 100 Hz FreeRTOS tick
+#define KNOB_POLL_MS     2      
 #define KNOB_FLUSH_MS    100      // net delta transmitted every this many ms (debounce window)
 #define LONG_PRESS_US    2000000    // 2 s in microseconds
 #define SHORT_PRESS_US     50000    // 50 ms debounce floor
@@ -104,21 +104,10 @@ static void knob_button_setup(void) {
 
 void app_main(void) {
     ESP_LOGI(TAG, "=== table controller booting ===");
-
-    // 1. Start the 1 ms tick that drives all fsm_time_event timers
     fsm_tick_init(1000);
     ESP_LOGI(TAG, "tick timer started (1 ms)");
-
-    // 2. Bring up WiFi + ESP-NOW before the FSM task can call send_packet
-    espnow_init();
-
-    // 3. Construct and start the controller FSM
     controller_ctor(&device);
     controller_init(&device, "controller");
-
-    // 4. Start polling the rotary encoder
     knob_setup();
-
-    // 5. Install button ISR
     knob_button_setup();
 }

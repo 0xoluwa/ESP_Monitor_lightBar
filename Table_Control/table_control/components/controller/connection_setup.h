@@ -2,6 +2,7 @@
 #define __CONNECTION_SETUP_H__
 
 #include <stdint.h>
+#include "controller.h"
 
 
 #define ESPNOW_CHANNEL 1
@@ -23,7 +24,7 @@ typedef struct __attribute__((packed)){
 
 extern uint8_t s_seq;
 
-void espnow_init(void);
+void espnow_init(controller *me);
 void send_packet(const app_pkt_t *pkt);
 
 #endif
