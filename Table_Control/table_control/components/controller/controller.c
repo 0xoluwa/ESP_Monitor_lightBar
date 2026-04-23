@@ -1,3 +1,12 @@
+/**
+ * @file controller.c
+ * @brief Device controller FSM – state handlers and helper functions.
+ *
+ * Implements the hierarchical state machine described in controller.h.
+ * All state handlers follow the state_handler signature and communicate
+ * back to the framework via the ::fsm_state return codes.
+ */
+
 #include "controller.h"
 #include "connection_setup.h"
 #include "config.h"
@@ -7,11 +16,22 @@
 
 static const char *TAG = "controller";
 
+/* ── Forward declarations ─────────────────────────────────────────────────── */
 static fsm_state entry_handler(controller *me, fsm_event *event);
-static fsm_state awake_state(controller * me, fsm_event * event);
-static fsm_state sleeping_state(controller * me, fsm_event * event);
-static fsm_state tx_state(controller *me, fsm_event * event);
+static fsm_state awake_state(controller *me, fsm_event *event);
+static fsm_state sleeping_state(controller *me, fsm_event *event);
+static fsm_state tx_state(controller *me, fsm_event *event);
 
+
+/* ── RGB LED helpers ──────────────────────────────────────────────────────── */
+
+/**
+ * @brief Configure the LEDC peripheral for the three RGB channels.
+ *
+ * Creates a single 8-bit, 1 kHz LEDC timer and binds channels 0–2 to the
+ * red, green, and blue LED pins respectively.  Installs the fade ISR so
+ * that ::power_led can use hardware-accelerated fading.
+ */
 void rgb_led_init(){
     ledc_timer_config_t timer_cfg_ = {
         .speed_mode = LEDC_LOW_SPEED_MODE,
@@ -46,6 +66,16 @@ void rgb_led_init(){
     ESP_ERROR_CHECK(ledc_fade_func_install(0));
 }
 
+/**
+ * @brief Start a PWM fade on one RGB LED channel.
+ *
+ * Maps the @p led selector to its LEDC channel, sets the target duty
+ * (0 or ::LED_PWM_DUTY), and starts a non-blocking fade over
+ * ::LED_FADE_TIME_MS milliseconds.
+ *
+ * @param led       Channel to control (::RED_LED, ::GREEN_LED, ::BLUE_LED).
+ * @param operation ::POWER_ON to fade up; ::POWER_DOWN to fade to 0.
+ */
 void power_led(active_led led, led_operation operation){
     ledc_channel_t led_channel;
     uint32_t target_duty;
@@ -84,9 +114,14 @@ void power_led(active_led led, led_operation operation){
 }
 
 
+/* ── Post helpers ─────────────────────────────────────────────────────────── */
 
-/* ── post helpers ────────────────────────────────────────────────────────── */
-
+/**
+ * @brief Enqueue a ::SIG_KNOB event from task context.
+ *
+ * @param me         Controller FSM.
+ * @param knob_count Signed delta (positive = CW, negative = CCW).
+ */
 void post_knob_count(controller *me, int knob_count){
     controller_event evt = {
         .super.signal = SIG_KNOB,
@@ -95,6 +130,12 @@ void post_knob_count(controller *me, int knob_count){
     fsm_post((fsm *)me, (fsm_event *)&evt);
 }
 
+/**
+ * @brief Enqueue a ::SIG_KNOB_BTN_PRESS event from an ISR.
+ *
+ * @param me             Controller FSM.
+ * @param press_duration ::SHORT_PRESS or ::LONG_PRESS.
+ */
 void IRAM_ATTR post_knob_button(controller *me, button_duration press_duration){
     controller_event evt = {
         .super.signal         = SIG_KNOB_BTN_PRESS,
@@ -104,6 +145,16 @@ void IRAM_ATTR post_knob_button(controller *me, button_duration press_duration){
 }
 
 
+/* ── Lifecycle ────────────────────────────────────────────────────────────── */
+
+/**
+ * @brief Construct the controller FSM instance.
+ *
+ * Creates the event queue, constructs the idle timer event bound to
+ * ::SLEEP_SIG, and sets the initial knob mode to ::BRIGHTNESS.
+ *
+ * @param me Controller instance to construct.
+ */
 void controller_ctor(controller *me){
     fsm_ctor((fsm *)me, QUEUE_DEPTH, sizeof(controller_event));
     fsm_time_event_ctor(&me->idle_timer, (fsm *)me, SLEEP_SIG);
@@ -111,6 +162,15 @@ void controller_ctor(controller *me){
     ESP_LOGI(TAG, "controller constructed");
 }
 
+/**
+ * @brief Initialise hardware peripherals and start the FSM task.
+ *
+ * Must be called after ::controller_ctor.  Brings up the RGB LED LEDC
+ * driver and the ESP-NOW link, then spawns the FSM dispatch task.
+ *
+ * @param me              Controller instance.
+ * @param controller_name FreeRTOS task name for the dispatch task.
+ */
 void controller_init(controller *me, const char *controller_name){
     rgb_led_init();
     espnow_init(me);
@@ -118,6 +178,19 @@ void controller_init(controller *me, const char *controller_name){
     fsm_init((fsm *)me, controller_name, (state_handler)entry_handler);
 }
 
+
+/* ── State handlers ───────────────────────────────────────────────────────── */
+
+/**
+ * @brief Initial pseudo-state – determines first real state on SIG_INIT.
+ *
+ * Logs whether the device woke from deep sleep (EXT0 / GPIO wakeup) or
+ * performed a cold boot, then immediately transitions to tx_state.
+ *
+ * @param me    Controller instance.
+ * @param event Incoming event (only SIG_INIT is handled here).
+ * @return ::STATE_TRANSITION on SIG_INIT; ::STATE_IGNORED otherwise.
+ */
 fsm_state entry_handler(controller *me, fsm_event *event){
     switch (event->signal){
         case SIG_INIT: {
@@ -132,11 +205,21 @@ fsm_state entry_handler(controller *me, fsm_event *event){
     return STATE_IGNORED;
 }
 
+/**
+ * @brief Deep-sleep entry state.
+ *
+ * On SIG_ENTRY: enables EXT0 wakeup on the button GPIO (active low) and
+ * calls esp_deep_sleep_start().  The function does not return; the next
+ * execution restarts from app_main.
+ *
+ * @param me    Controller instance.
+ * @param event Incoming event.
+ * @return ::STATE_IGNORED (SIG_ENTRY does not return normally).
+ */
 fsm_state sleeping_state(controller *me, fsm_event *event){
     switch (event->signal){
         case SIG_ENTRY:
             ESP_LOGI(TAG, "entering deep sleep");
-
             esp_sleep_enable_ext0_wakeup((gpio_num_t)KNOB_BUTTON_PIN, 0);
             esp_deep_sleep_start();
             break;
@@ -144,6 +227,17 @@ fsm_state sleeping_state(controller *me, fsm_event *event){
     return STATE_IGNORED;
 }
 
+/**
+ * @brief Super-state for all active (non-sleeping) behaviour.
+ *
+ * Acts as a catch-all parent for tx_state.  Handles ::SLEEP_SIG to
+ * transition the machine into sleeping_state.  All other events are
+ * returned as ::STATE_IGNORED for further bubbling.
+ *
+ * @param me    Controller instance.
+ * @param event Incoming event.
+ * @return ::STATE_TRANSITION on ::SLEEP_SIG; ::STATE_IGNORED otherwise.
+ */
 fsm_state awake_state(controller *me, fsm_event *event){
     switch (event->signal){
         case SLEEP_SIG:
@@ -152,6 +246,23 @@ fsm_state awake_state(controller *me, fsm_event *event){
     return STATE_IGNORED;
 }
 
+/**
+ * @brief Active transmission state – handles all normal user interactions.
+ *
+ * | Signal              | Action                                                        |
+ * |---------------------|---------------------------------------------------------------|
+ * | SIG_ENTRY           | Turn on blue LED; arm 30 s idle timer.                        |
+ * | SIG_KNOB            | Build and send a brightness or CCT packet; rearm idle timer.  |
+ * | SIG_KNOB_BTN_PRESS  | Short: toggle mode + rearm timer. Long: send power packet.   |
+ * | CONNECTED_SIG       | Blue LED on, red LED off (ACK received).                      |
+ * | DISCONNECTED_SIG    | Blue LED off, red LED on (no ACK).                            |
+ * | SIG_EXIT            | Disarm idle timer; turn off blue LED.                         |
+ * | (unhandled)         | Delegate to awake_state via SUPER().                          |
+ *
+ * @param me    Controller instance.
+ * @param event Incoming event.
+ * @return ::STATE_HANDLED for handled signals; result of awake_state for unhandled ones.
+ */
 fsm_state tx_state(controller *me, fsm_event *event)
 {
     switch (event->signal){
@@ -204,12 +315,12 @@ fsm_state tx_state(controller *me, fsm_event *event)
             power_led(BLUE_LED, POWER_DOWN);
             power_led(RED_LED, POWER_ON);
             break;
-        
+
         case CONNECTED_SIG:
             power_led(BLUE_LED, POWER_ON);
             power_led(RED_LED, POWER_DOWN);
             break;
-            
+
         case SIG_EXIT:
             fsm_time_event_disarm(&me->idle_timer);
             power_led(BLUE_LED, POWER_DOWN);
