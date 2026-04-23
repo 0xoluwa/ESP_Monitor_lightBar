@@ -1,3 +1,11 @@
+/**
+ * @file controller.h
+ * @brief Public API for the light-bar controller.
+ *
+ * The controller is a flat FSM (built on the ::fsm framework) that manages
+ * LED brightness, correlated colour temperature (CCT), smooth animation,
+ * NVS persistence, and power state.
+ */
 #ifndef __LIGHTBAR_CONTROLLER_H__
 #define __LIGHTBAR_CONTROLLER_H__
 
@@ -7,130 +15,121 @@
 #include "nvs.h"
 #include <stdint.h>
 #include <stdbool.h>
+#include "config.h"
+#include "timer_evt.h"
 
-// ─── ESP-NOW packet types (shared with table_controller) ─────────────────────
-typedef enum __attribute__((packed)) {
-    PKT_BRIGHTNESS_EVENT = 0x01,
-    PKT_PRESET_EVENT     = 0x02,
-    PKT_KNOB_BUTTON      = 0x03,
-    PKT_HEARTBEAT        = 0x04
-} pkt_type_t;
+/**
+ * @brief HSV look-up table mapping CCT frame index to hue/saturation pairs.
+ *
+ * Indexed by CCT frame (0 – CCT_TABLE_SIZE-1). Each row is
+ * { hue_16bit, saturation_16bit }, ready for led_strip_set_pixel_hsv_16().
+ */
+extern const uint16_t color_temp_lookup[65][2];
 
-typedef struct __attribute__((packed)) {
-    pkt_type_t type;
-    uint8_t    seq;
-    union {
-        int16_t knob_delta;
-        uint8_t knob_button_state;
-    };
-} app_pkt_t;
-
-// ─── LED configuration ────────────────────────────────────────────────────────
-#define LIGHTBAR_NUM_LEDS   76
-
-// ─── Color temperature range (Kelvin) ─────────────────────────────────────────
-#define CCT_MIN      1500.0f
-#define CCT_MAX      6500.0f
-
-// ─── Discrete frame counts ────────────────────────────────────────────────────
-// 100 frames for both brightness and CCT.  Each encoder click = 1 frame.
-// CCT frame 0 = CCT_MIN (1500 K), frame 99 = CCT_MAX (6500 K).
-// Brightness frame 0 = off, frame 99 = full brightness.
-#define CCT_FRAMES   100
-#define BRT_FRAMES   100
-
-// ─── Animation ───────────────────────────────────────────────────────────────
-// Exponential smoothing in *frame units* (0–99), sampled at 50 Hz.
-// alpha = 0.10 → max 99-frame change settles within 0.5 frame in ~1 s:
-//   99 * (0.90)^n < 0.5  →  n ≈ 50 steps = 1.0 s at 50 Hz.
-#define ANIM_TICK_MS        20          // ~50 Hz, safe with default 100 Hz FreeRTOS
-#define ANIM_ALPHA          0.10f       // exponential smoothing factor
-#define ANIM_EPSILON        0.5f        // snap threshold in frame units (shared brt + CCT)
-
-// ─── FSM queue depth ─────────────────────────────────────────────────────────
-#define LIGHTBAR_QUEUE_DEPTH  50
-
-// ─── Timer channels ──────────────────────────────────────────────────────────
-#define TIMER_CH_ANIM   TIMER_CHANNEL_0   // 50 Hz animation tick
-
-// ─── Signals ─────────────────────────────────────────────────────────────────
-enum lightbar_signal : uint8_t {
-    // Power toggle: local power button OR remote PKT_KNOB_BUTTON
-    SIG_POWER      = SIG_USER_CODE,
-    // CCT change: delta==0 → local preset button (cycle), delta!=0 → remote knob
-    SIG_PRESET,
-    // Brightness delta from remote (PKT_BRIGHTNESS_EVENT)
-    SIG_BRIGHTNESS,
-    // 50 Hz tick from FreeRTOS timer → drives smooth interpolation
-    SIG_ANIM_TICK,
-    SIG_MAX
+/**
+ * @brief Application-level signals dispatched to the light-bar FSM.
+ *
+ * Values start at ::SIG_USER_CODE so they do not collide with the
+ * framework-reserved signals (ENTRY / EXIT / INIT).
+ */
+enum lightbar_signal {
+    SIG_POWER             = SIG_USER_CODE, /**< Power toggle (button or remote). */
+    SIG_COLOR_TEMP_PRESET,                 /**< Cycle through three CCT presets. */
+    SIG_COLOR_TEMP,                        /**< Continuous CCT adjustment carrying a signed delta. */
+    SIG_BRIGHTNESS,                        /**< Continuous brightness adjustment carrying a signed delta. */
+    SIG_ANIM_TICK,                         /**< 50 Hz animation tick driving smooth interpolation. */
+    SIG_MAX                                /**< Sentinel — total number of application signals. */
 };
 
-// ─── Extended event ───────────────────────────────────────────────────────────
-// Payload for SIG_BRIGHTNESS and SIG_PRESET (remote): signed encoder delta.
-// Must fit within FSM_MAX_EVENT_SIZE (currently 8 bytes).
-typedef struct __attribute__((packed)) {
-    fsm_event super;    // MUST be first member; contains uint8_t signal
-    int16_t   delta;    // encoder delta; 0 for button-press signals
+/**
+ * @brief Event structure used by all light-bar signals.
+ *
+ * Extends ::fsm_event with a signed delta field consumed by
+ * ::SIG_COLOR_TEMP and ::SIG_BRIGHTNESS events.
+ */
+typedef struct {
+    fsm_event super; /**< Base event — **must** be the first member. */
+    int16_t   delta; /**< Encoder step count; 0 for button-press signals. */
 } lightbar_event;
 
-// ─── Forward declaration ─────────────────────────────────────────────────────
+/** @brief Forward declaration of the controller structure. */
 typedef struct LIGHTBAR_CONTROLLER lightbar_controller;
 
-// ─── Controller struct ────────────────────────────────────────────────────────
+/**
+ * @brief Light-bar controller state-machine object.
+ *
+ * Embeds ::fsm as its first member so the controller pointer can be cast to
+ * `fsm *` freely throughout the FSM framework.
+ */
 struct LIGHTBAR_CONTROLLER {
-    fsm super;           // MUST be first — cast-compatible with fsm *
+    fsm            super;      /**< Base FSM — **must** be the first member. */
+    fsm_time_event anim_timer; /**< Periodic timer that fires ::SIG_ANIM_TICK. */
 
-    struct {
-        gpio_num_t power_btn_pin;
-        gpio_num_t preset_btn_pin;
-        gpio_num_t led_data_pin;
-    } pin;
+    gpio_num_t         led_pin;      /**< GPIO driving the LED strip data line. */
+    led_strip_handle_t strip_handle; /**< Handle to the LED strip driver. */
 
-    led_strip_handle_t strip;
+    int brt_target_frame; /**< Desired brightness frame index (animation destination). */
+    int cct_target_frame; /**< Desired CCT frame index (animation destination). */
 
-    // Discrete frame targets (integer, 0–99).  Each encoder tick moves by 1 frame.
-    int16_t brt_target;         // brightness target frame (0 = off, 99 = full)
-    int16_t cct_target;         // CCT target frame (0 = 1500 K warm, 99 = 6500 K cool)
-    int16_t saved_brt_idx;      // brightness preserved across power-off / power-on
+    int brt_curr_frame; /**< Current brightness frame index (interpolating toward target). */
+    int cct_cur_frame;  /**< Current CCT frame index (interpolating toward target). */
 
-    // Smooth animation state (float frame units, driven toward *_target each tick)
-    float brt_anim;             // 0.0 – 99.0  (what the strip shows right now)
-    float cct_anim;             // 0.0 – 99.0
-
-    // Set true when powering off so animation drives to off_state on completion
-    bool turning_off;
-
-    // NVS handle (kept open for the lifetime of the controller)
-    nvs_handle_t nvs;
-
-    // Precomputed gamma-2.2 lookup table (index = linear, value = gamma-corrected)
-    uint8_t gamma_lut[256];
+    nvs_handle_t nvs; /**< NVS namespace handle kept open for the controller's lifetime. */
 };
 
-// ─── Public API ──────────────────────────────────────────────────────────────
+/**
+ * @brief Construct a ::lightbar_controller.
+ *
+ * Initialises the embedded FSM and records the LED GPIO pin.  Must be called
+ * before lightbar_init().
+ *
+ * @param me      Pointer to the controller instance to initialise.
+ * @param led_pin GPIO number connected to the LED strip.
+ */
+void lightbar_ctor(lightbar_controller *me, gpio_num_t led_pin);
 
-// Call before lightbar_init. Initialises NVS, LED strip, loads persisted state.
-void lightbar_ctor(lightbar_controller *me,
-                   gpio_num_t power_pin,
-                   gpio_num_t preset_pin,
-                   gpio_num_t led_pin);
-
-// Call after GPIO ISRs are installed. Starts ESP-NOW and the FSM task.
+/**
+ * @brief Initialise and start the light-bar controller.
+ *
+ * Sets up the LED strip driver, opens NVS, initialises ESP-NOW, starts the
+ * FSM tick, and creates the FSM dispatch task.  Must be called after
+ * lightbar_ctor().
+ *
+ * @param me        Pointer to the controller instance.
+ * @param task_name FreeRTOS task name string.
+ */
 void lightbar_init(lightbar_controller *me, const char *task_name);
 
-// Call from GPIO ISRs — debounce handled internally (20 ms ISR timestamp).
-void lightbar_post_power_isr(lightbar_controller *me);
-void lightbar_post_preset_isr(lightbar_controller *me);
+/**
+ * @brief Post a power-toggle event from task context.
+ * @param me Pointer to the controller instance.
+ */
+void post_power_button(lightbar_controller *me);
 
-// Call from the ESP-NOW receive callback (task context, not ISR).
-void lightbar_post_espnow_pkt(lightbar_controller *me, const app_pkt_t *pkt);
+/**
+ * @brief Post a power-toggle event from ISR context.
+ * @param me Pointer to the controller instance.
+ */
+void post_power_button_isr(lightbar_controller *me);
 
-// ─── FSM state functions ──────────────────────────────────────────────────────
-fsm_state lightbar_entry_state      (fsm *me, fsm_event *e);
-fsm_state lightbar_off_state        (fsm *me, fsm_event *e);
-fsm_state lightbar_on_state         (fsm *me, fsm_event *e);   // parent — never set as me->state
-fsm_state lightbar_brightness_state (fsm *me, fsm_event *e);
-fsm_state lightbar_preset_state     (fsm *me, fsm_event *e);
+/**
+ * @brief Post a color-temperature preset cycle event from ISR context.
+ * @param me Pointer to the controller instance.
+ */
+void post_color_temp_button(lightbar_controller *me);
 
-#endif // __LIGHTBAR_CONTROLLER_H__
+/**
+ * @brief Post a continuous color-temperature adjustment event from task context.
+ * @param me    Pointer to the controller instance.
+ * @param delta Signed step count from the rotary encoder.
+ */
+void post_color_temp_delta(lightbar_controller *me, int delta);
+
+/**
+ * @brief Post a continuous brightness adjustment event from task context.
+ * @param me    Pointer to the controller instance.
+ * @param delta Signed step count from the rotary encoder.
+ */
+void post_brightness_delta(lightbar_controller *me, int delta);
+
+#endif /* __LIGHTBAR_CONTROLLER_H__ */

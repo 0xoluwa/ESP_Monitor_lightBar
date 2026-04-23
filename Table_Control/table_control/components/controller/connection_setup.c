@@ -11,16 +11,30 @@
 
 #define TAG "connection"
 
-static const uint8_t LIGHTBAR_MAC[ESP_NOW_ETH_ALEN] = {0xE8, 0xF6, 0x0A, 0x13, 0x75, 0x3C};
+static const uint8_t LIGHTBAR_MAC[ESP_NOW_ETH_ALEN] = {0xB4, 0xBF, 0xE9, 0x15, 0xA6, 0xD4};
+
+static controller * user_device = NULL;
 
 uint8_t s_seq = 0;
 
 static QueueHandle_t s_send_queue;
 
 static void send_cb(const uint8_t *mac, esp_now_send_status_t status) {
+    (void) mac;
     if (status == ESP_NOW_SEND_SUCCESS) {
+        controller_event evt = {
+            .super.signal = CONNECTED_SIG 
+        };
+
+        fsm_post((fsm *) user_device, (fsm_event *) &evt);
+
         ESP_LOGI(TAG, "send ACK ✓");
     } else {
+        controller_event evt = {
+            .super.signal = DISCONNECTED_SIG 
+        };
+
+        fsm_post((fsm *) user_device, (fsm_event *) &evt);
         ESP_LOGW(TAG, "send FAIL — lightbar not ACKing (wrong channel or not running?)");
     }
 }
@@ -36,7 +50,8 @@ static void sender_task(void *pv){
     }
 }
 
-void espnow_init(void){
+void espnow_init(controller *me){
+    user_device = me;
     esp_err_t ret = nvs_flash_init();
     if(ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND){
         ESP_ERROR_CHECK(nvs_flash_erase());
@@ -66,7 +81,7 @@ void espnow_init(void){
 
     s_send_queue = xQueueCreate(8, sizeof(app_pkt_t));
     configASSERT(s_send_queue);
-    assert(xTaskCreate(sender_task, "espnow_sender", 4096, NULL, 1, NULL));
+    configASSERT(xTaskCreate(sender_task, "espnow_sender", 4096, NULL, 1, NULL));
 }
 
 void send_packet(const app_pkt_t *pkt){

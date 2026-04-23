@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "fsm.c" "timer_evt.c"
+    SRCS "fsm.c" "timer_evt.c" "fsm_port.c"
     INCLUDE_DIRS "."
     REQUIRES
         esp_timer

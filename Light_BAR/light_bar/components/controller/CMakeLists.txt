@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "controller.c"
+    SRCS "controller.c" "color_temp_hsv_lookup.c" "connection.c"
     INCLUDE_DIRS "."
 
     REQUIRES
