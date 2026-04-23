@@ -5,6 +5,7 @@
 #include "led_strip.h"
 #include "connection.h"
 
+const char * LIGHTBAR_DEBUG = "light debug";
 
 const static uint8_t color_temp_preset_index[3] = {10, 35, 60};
 
@@ -92,6 +93,8 @@ fsm_state lightbar_on_state(lightbar_controller *me, fsm_event *e){
                 .super.signal = SIG_ANIM_TICK
             };
 
+            ESP_LOGI(LIGHTBAR_DEBUG, "cct target frame: %i", me->cct_target_frame);
+
             fsm_post((fsm *) me, (fsm_event *) &anim_event);
             break;
         }
@@ -110,6 +113,8 @@ fsm_state lightbar_on_state(lightbar_controller *me, fsm_event *e){
                 .super.signal = SIG_ANIM_TICK
             };
 
+            ESP_LOGI(LIGHTBAR_DEBUG, "cct target frame: %i", me->cct_target_frame);
+
             fsm_post((fsm *) me, (fsm_event *) &anim_event);
             break;
         }
@@ -122,6 +127,8 @@ fsm_state lightbar_on_state(lightbar_controller *me, fsm_event *e){
             lightbar_event anim_event = {
                 .super.signal = SIG_ANIM_TICK
             };
+
+            ESP_LOGI(LIGHTBAR_DEBUG, "brt target frame: %i", me->brt_target_frame);
 
             fsm_post((fsm *) me, (fsm_event *) &anim_event);
             break;      
@@ -216,14 +223,14 @@ void led_strip_set_brightness(lightbar_controller *me, uint8_t brightness_index)
 {
     const uint16_t *current_temp_hsv_index = color_temp_lookup[me->cct_cur_frame];
     for (int pixel_count = 0; pixel_count < LIGHTBAR_NUM_LEDS; pixel_count++){
-        ESP_ERROR_CHECK(led_strip_set_pixel_hsv_16(me->strip_handle, pixel_count, current_temp_hsv_index[0], current_temp_hsv_index[1], gamma_lut[brightness_index]));
+        ESP_ERROR_CHECK(led_strip_set_pixel_hsv_16(me->strip_handle, pixel_count, current_temp_hsv_index[0], current_temp_hsv_index[1], brightness_index));
     }
 }
 
 void led_strip_set_color_temp(lightbar_controller *me, uint8_t kelvin_index)
 {
     for (int pixel_count = 0; pixel_count < LIGHTBAR_NUM_LEDS; pixel_count++){
-        ESP_ERROR_CHECK(led_strip_set_pixel_hsv_16(me->strip_handle, pixel_count, color_temp_lookup[kelvin_index][0], color_temp_lookup[kelvin_index][1], gamma_lut[me->brt_curr_frame]));
+        ESP_ERROR_CHECK(led_strip_set_pixel_hsv_16(me->strip_handle, pixel_count, color_temp_lookup[kelvin_index][0], color_temp_lookup[kelvin_index][1], me->brt_curr_frame));
     }
 }
 

@@ -59,6 +59,6 @@ void controller_ctor(controller * me);
 void controller_init(controller * me, const char* controller_name);
 
 void post_knob_count(controller * me, int knob_count);
-void post_knob_button(controller *me, button_duration press_duration);
+void IRAM_ATTR post_knob_button(controller *me, button_duration press_duration);
 
 #endif

@@ -20,7 +20,7 @@ void fsm_time_event_ctor (fsm_time_event *me, fsm *owner, uint8_t signal);
 void fsm_time_event_arm  (fsm_time_event *me, uint64_t nTicks, uint64_t interval);
 bool fsm_time_event_rearm(fsm_time_event *me, uint64_t nTicks);
 void fsm_time_event_disarm(fsm_time_event *me);
-void fsm_tick(void);
+void IRAM_ATTR fsm_tick(void);
 void fsm_tick_init(uint64_t period_us);
 void fsm_tick_deinit(void);
 

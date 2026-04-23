@@ -37,7 +37,7 @@ void recv_cb(const esp_now_recv_info_t * esp_now_info, const uint8_t *data, int 
     const app_pkt_t *msg = (const app_pkt_t *) data;
     switch(msg->type){
         case PKT_BRIGHTNESS_EVENT:
-            post_brightness_delta(user_device, msg->knob_delta);
+            post_brightness_delta(user_device, msg->knob_delta * BRIGHTNESS_MULTIPLIER_PATCH);  //brigthness multiplier patch
             break;
         
         case PKT_COLOR_TEMP_EVENT:

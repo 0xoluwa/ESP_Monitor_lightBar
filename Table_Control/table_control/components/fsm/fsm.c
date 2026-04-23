@@ -29,7 +29,7 @@ bool fsm_post(fsm *me, fsm_event const * event){
     return FSM_QUEUE_SEND(me->queue_, event);
 }
 
-void fsm_post_from_isr(fsm *me, fsm_event const * event){
+void IRAM_ATTR fsm_post_from_isr(fsm *me, fsm_event const * event){
     FSM_QUEUE_SEND_FROM_ISR(me->queue_, event);
 }
 

@@ -12,7 +12,6 @@
 
 
 extern const uint16_t color_temp_lookup[65][2];
-extern const uint8_t gamma_lut[101];
 
 
 // ─── Signals ─────────────────────────────────────────────────────────────────

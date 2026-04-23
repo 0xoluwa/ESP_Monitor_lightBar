@@ -6,7 +6,7 @@ fsm_time_event *time_event_list_head = NULL;
 
 static esp_timer_handle_t tick_timer_ = NULL;
 
-static void tick_isr_cb(void *arg){
+static void IRAM_ATTR tick_isr_cb(void *arg){
     (void)arg;
     fsm_tick();
 }
@@ -132,7 +132,7 @@ void fsm_time_event_disarm(fsm_time_event *me){
 /* --- tick ----------------------------------------------------------------- */
 /* Call from a periodic ISR or tick-hook at the desired timer resolution.     *
  * Walks the armed list, decrements counters, posts expired events.           */
-void fsm_tick(void){
+void IRAM_ATTR fsm_tick(void){
     fsm_time_event *expired[MAX_FSM_TIMERS];
     int n_expired = 0;
 

@@ -95,7 +95,7 @@ void post_knob_count(controller *me, int knob_count){
     fsm_post((fsm *)me, (fsm_event *)&evt);
 }
 
-void post_knob_button(controller *me, button_duration press_duration){
+void IRAM_ATTR post_knob_button(controller *me, button_duration press_duration){
     controller_event evt = {
         .super.signal         = SIG_KNOB_BTN_PRESS,
         .knob_button_duration = press_duration,

@@ -16,12 +16,13 @@ typedef enum {
 } enc_state_t;
 
 // [prev_state][curr_state] → delta
+// Only count on arrival at S3 (detent position) to yield 1 count per detent.
 static const int8_t knob_lookup[4][4] = {
 //  curr:  S0   S1   S2   S3
-/* S0 */  { 0,  -1,  +1,  99 },
-/* S1 */  {+1,   0,  99,  -1 },
-/* S2 */  {-1,  99,   0,  +1 },
-/* S3 */  {99,  +1,  -1,   0 },
+/* S0 */  { 0,   0,   0,  99 },
+/* S1 */  { 0,   0,  99,  -1 },
+/* S2 */  { 0,  99,   0,  +1 },
+/* S3 */  {99,   0,   0,   0 },
 };
 
 typedef struct {
