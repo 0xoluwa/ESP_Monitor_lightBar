@@ -44,6 +44,9 @@ static const char *TAG = "main";
 /** @brief Handle for the FreeRTOS software timer that drives the encoder poll. */
 static TimerHandle_t    knob_timer_handle;
 
+/** @brief One-shot FreeRTOS timer that fires after LONG_PRESS_US to post LONG_PRESS early. */
+static TimerHandle_t    long_press_timer_handle;
+
 /** @brief Encoder state machine handle. */
 static encoder_handle_t knob_handle;
 
@@ -113,52 +116,84 @@ static void knob_setup(void) {
 
 /* ── Button ISR ───────────────────────────────────────────────────────────── */
 
+/** @brief Timestamp of the most recent falling edge, in microseconds. */
+static volatile int64_t btn_press_start_us = 0;
+
+/** @brief Set to true by the long-press timer callback once LONG_PRESS has been posted. */
+static volatile bool    long_press_fired   = false;
+
 /**
- * @brief GPIO ISR – measures button press duration and classifies it.
+ * @brief FreeRTOS timer callback – posts LONG_PRESS while the button is still held.
+ *
+ * Armed on every falling edge with a period of ::LONG_PRESS_US.  If the button
+ * is still down when the timer expires this callback fires in the timer task,
+ * posts ::LONG_PRESS immediately, and sets ::long_press_fired so the subsequent
+ * rising edge does not re-classify the press.
+ *
+ * @param xTimer FreeRTOS timer handle (unused).
+ */
+static void long_press_timer_cb(TimerHandle_t xTimer) {
+    long_press_fired = true;
+    post_knob_button(&device, LONG_PRESS);
+}
+
+/**
+ * @brief GPIO ISR – classifies button presses with early long-press detection.
  *
  * Triggered on both edges of the button GPIO (active-low with pull-up).
  *
- *  - **Falling edge** (level = 0): record the press start time.
- *  - **Rising edge**  (level = 1): compute duration and classify:
- *    - < ::SHORT_PRESS_US   → noise/glitch; discarded.
- *    - >= ::SHORT_PRESS_US  → ::SHORT_PRESS posted to the controller.
- *    - >= ::LONG_PRESS_US   → ::LONG_PRESS posted to the controller.
+ *  - **Falling edge** (level = 0): record press start and arm the one-shot
+ *    ::long_press_timer_handle for ::LONG_PRESS_US.
+ *  - **Rising edge**  (level = 1): disarm the timer, then:
+ *    - If ::long_press_fired – the press was already reported; do nothing.
+ *    - Else if duration >= ::SHORT_PRESS_US → post ::SHORT_PRESS.
+ *    - Else – noise/glitch; discard.
  *
  * @param arg Unused GPIO ISR argument.
  */
 static void IRAM_ATTR knob_button_isr(void *arg) {
-    static int64_t press_start_us = 0;
+    BaseType_t higher_woken = pdFALSE;
     int64_t now   = esp_timer_get_time();
     int     level = gpio_get_level((gpio_num_t)KNOB_BUTTON_PIN);
 
     if (level == 0) {
-        /* Falling edge – record press start */
-        press_start_us = now;
+        /* Falling edge – arm the long-press timer */
+        btn_press_start_us = now;
+        long_press_fired   = false;
+        xTimerStartFromISR(long_press_timer_handle, &higher_woken);
     } else {
-        /* Rising edge – compute and classify duration */
-        if (press_start_us == 0) return;    /* missed the press edge – ignore */
-        int64_t duration = now - press_start_us;
-        press_start_us = 0;
+        /* Rising edge – disarm timer; classify only if long press not yet fired */
+        xTimerStopFromISR(long_press_timer_handle, &higher_woken);
 
-        if (duration >= LONG_PRESS_US)
-            post_knob_button(&device, LONG_PRESS);
-        else if (duration >= SHORT_PRESS_US)
-            post_knob_button(&device, SHORT_PRESS);
-        /* else: glitch shorter than debounce floor – discard */
+        if (btn_press_start_us != 0) {
+            int64_t duration   = now - btn_press_start_us;
+            btn_press_start_us = 0;
+
+            if (!long_press_fired && duration >= SHORT_PRESS_US)
+                post_knob_button(&device, SHORT_PRESS);
+            /* else: long press already posted, or glitch – discard */
+        }
     }
+    portYIELD_FROM_ISR(higher_woken);
 }
 
 /**
  * @brief Configure the button GPIO and install the edge-triggered ISR.
  *
- * Sets ::KNOB_BUTTON_PIN as an input with an internal pull-up and
- * configures it to trigger on any edge so that both press and release
- * transitions are captured for duration measurement.
+ * Creates the one-shot ::long_press_timer_handle (period = ::LONG_PRESS_US)
+ * used for early long-press detection, then sets ::KNOB_BUTTON_PIN as an
+ * input with an internal pull-up and registers ::knob_button_isr on any edge.
  *
  * Installs the GPIO ISR service (shared across all GPIO ISRs) and
  * registers ::knob_button_isr for this pin.
  */
 static void knob_button_setup(void) {
+    long_press_timer_handle = xTimerCreate("lp_btn",
+                                           pdMS_TO_TICKS(LONG_PRESS_US / 1000),
+                                           pdFALSE,             /* one-shot */
+                                           NULL,
+                                           long_press_timer_cb);
+
     gpio_config_t cfg = {
         .pin_bit_mask = (1ULL << KNOB_BUTTON_PIN),
         .mode         = GPIO_MODE_INPUT,
