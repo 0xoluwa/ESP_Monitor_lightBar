@@ -8,7 +8,7 @@
 /** @brief GPIO pin connected to the WS2812 LED strip data line. */
 #define LED_STRIP_PIN 2
 
-#define LED_STRIP_LED_COUNT 76
+#define LED_STRIP_COUNT 76
 
 /** @brief GPIO pin for the power toggle button. */
 #define POWER_BUTTON_PIN 5
@@ -28,5 +28,8 @@
 #define TEMP_INDEX_PRESET_1 30
 #define TEMP_INDEX_PRESET_2 45
 #define TEMP_INDEX_PRESET_3 60
+
+#define ANIMATION_PERIOD 20000
+#define STORAGE_WRITE_PERIOD 1000000
 
 #endif /* __SRC_CONFIG_H__ */

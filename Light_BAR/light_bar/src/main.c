@@ -12,10 +12,36 @@
 
 
 TaskHandle_t led_task_handle = NULL;
-TaskHandle_t storage_task_handle = NULL;
 
 QueueHandle_t led_queue;
-QueueHandle_t storage_queue;
+
+esp_timer_handle_t led_anim_timer;
+esp_timer_handle_t storage_write_timer;
+
+nvs_handle_t storage_handle;
+
+const char * temp_index_key = "temp_index";
+const char * brightness_index_key = "brightness_index";
+
+void led_animation_callback(void * args);
+void storage_write_callback(void * args);
+
+static inline void timeout_init(esp_timer_handle_t *timer_handle, esp_timer_cb_t user_callback, const char * timer_name){
+  esp_timer_create_args_t timer_cfg = {
+    .callback = user_callback,
+    .arg = NULL,
+    .dispatch_method = ESP_TIMER_TASK,
+    .name = timer_name,
+    .skip_unhandled_events = true
+  };
+
+  ESP_ERROR_CHECK(esp_timer_create(&timer_cfg, timer_handle));
+}
+
+static inline void storage_init(){
+  ESP_ERROR_CHECK(nvs_flash_init());
+  ESP_ERROR_CHECK(nvs_open("LED STORAGE", NVS_READWRITE, &storage_handle));
+}
 
 static int clip_range(int num, int min, int max){
   if (num < min) return min;
@@ -28,6 +54,7 @@ typedef enum {
   POWER_SIG,
   KNOB_SIG,
   COLOR_TEMP_SIG,
+  STORAGE_SIG,
   MAX_SIG
 } signal;
 
@@ -44,29 +71,31 @@ typedef enum {
   MAX_POWER_STATE
 } power_state;
 
-typedef struct {
-  int brightness_index;
-  int color_temp_index;
-} storage_message_t;
+rgb_t cct_apply_brightness(rgb_t cct_rgb, uint8_t brightness) {
+    return (rgb_t){
+        .red = (uint8_t)((cct_rgb.red * brightness + 127) / 255),
+        .green = (uint8_t)((cct_rgb.green * brightness + 127) / 255),
+        .blue = (uint8_t)((cct_rgb.blue * brightness + 127) / 255),
+    };
+}
 
 void led_task(void *pvParameters);
 void storage_task(void *pvParameters);
 
-void app_main(void) {}
-
 void led_task(void *pvParameters) {
-  int current_brightness_index = 0;
-  int current_color_temp_index = 0;
-  int target_brightness_index = 0;
-  int target_color_temp_index = 0;
+  uint8_t current_brightness_index = 0;
+  uint8_t current_color_temp_index = 0;
+  uint8_t target_brightness_index = 0;
+  uint8_t target_color_temp_index = 0;
   power_state power_state_ = OFF;
+  rgb_t base_color;
 
   led_message_t led_message = {0};
   led_strip_handle_t led_strip = NULL;
 
   led_strip_config_t strip_config = {
       .strip_gpio_num = LED_STRIP_PIN,
-      .max_leds = LED_STRIP_LED_COUNT,
+      .max_leds = LED_STRIP_COUNT,
       .led_model = LED_MODEL_WS2812,
       .color_component_format = LED_STRIP_COLOR_COMPONENT_FMT_GRB,
       .flags = {
@@ -81,17 +110,44 @@ void led_task(void *pvParameters) {
                                        }};
   ESP_ERROR_CHECK(led_strip_new_spi_device(&strip_config, &spi_config, &led_strip));
 
+  timeout_init(&led_anim_timer, led_animation_callback, "ANIMATION TIMER");
+  timeout_init(&storage_write_timer, storage_write_callback, "STORAGE WRITE");
+
+  esp_err_t ret;
+  ret = nvs_get_u8(storage_handle, temp_index_key, &target_color_temp_index);
+  if (ret == ESP_ERR_NVS_NOT_FOUND) {
+    target_color_temp_index = DEFAULT_TEMP_INDEX;
+    ESP_ERROR_CHECK(nvs_set_u8(storage_handle, temp_index_key, DEFAULT_TEMP_INDEX));
+  }
+  else ESP_ERROR_CHECK(ret);
+
+  ret = nvs_get_u8(storage_handle, brightness_index_key, &target_brightness_index);
+  if (ret == ESP_ERR_NVS_NOT_FOUND){
+    target_brightness_index = DEFAULT_BRIGHTNESS_INDEX;
+    ESP_ERROR_CHECK(nvs_set_u8(storage_handle, brightness_index_key, DEFAULT_BRIGHTNESS_INDEX));
+  }
+  else ESP_ERROR_CHECK(ret);
+
+  if ((current_brightness_index != target_brightness_index) || (current_color_temp_index != target_color_temp_index)){
+    xQueueSend(led_queue, &((led_message_t) {.event_sig = ANIM_TICK_SIG}), 0);
+  }
+
   while (1) {
     xQueueReceive(led_queue, &led_message, portMAX_DELAY);
     switch (led_message.event_sig) {
     case POWER_SIG:{
+      esp_err_t stop_ret = esp_timer_stop(storage_write_timer);
+      if (stop_ret != ESP_OK && stop_ret != ESP_ERR_INVALID_STATE) ESP_ERROR_CHECK(stop_ret);
+
       if (power_state_ == ON){
         target_brightness_index = 0;
-        target_color_temp_index = 0;
 
         power_state_ = OFF;
       }else{
         power_state_ = ON;
+
+        ESP_ERROR_CHECK(nvs_get_u8(storage_handle, temp_index_key, &target_color_temp_index));
+        ESP_ERROR_CHECK(nvs_get_u8(storage_handle, brightness_index_key, &target_brightness_index));
       }
 
       if ((current_brightness_index != target_brightness_index) || (current_color_temp_index != target_color_temp_index)){
@@ -102,41 +158,100 @@ void led_task(void *pvParameters) {
     }
 
     case KNOB_SIG:{
-      target_brightness_index += led_message.brightness_index;
-      target_color_temp_index += led_message.color_temp_index;
-      target_brightness_index = clip_range(target_brightness_index, MIN_BRIGHTNESS_INDEX, MAX_BRIGHTNESS_INDEX);
-      target_color_temp_index = clip_range(target_color_temp_index, MIN_TEMP_INDEX, MAX_TEMP_INDEX);
+      if (power_state_ == OFF) break;
+      target_brightness_index = clip_range((target_brightness_index + led_message.brightness_index), MIN_BRIGHTNESS_INDEX, MAX_BRIGHTNESS_INDEX);
+      target_color_temp_index = clip_range((target_color_temp_index + led_message.color_temp_index), MIN_TEMP_INDEX, MAX_TEMP_INDEX);
 
       if ((current_brightness_index != target_brightness_index) || (current_color_temp_index != target_color_temp_index)){
         xQueueSend(led_queue, &((led_message_t) {.event_sig = ANIM_TICK_SIG}), 0);
+        
+        esp_err_t stop_ret = esp_timer_stop(storage_write_timer);
+        if (stop_ret != ESP_OK && stop_ret != ESP_ERR_INVALID_STATE) ESP_ERROR_CHECK(stop_ret);
+        ESP_ERROR_CHECK(esp_timer_start_once(storage_write_timer, STORAGE_WRITE_PERIOD));
       }
       break;
     }
 
     case COLOR_TEMP_SIG:{
-      if ((target_color_temp_index < TEMP_INDEX_PRESET_1) || (target_color_temp_index > TEMP_INDEX_PRESET_3)) target_color_temp_index = TEMP_INDEX_PRESET_1;
+      if (power_state_ == OFF) break;
+      if ((target_color_temp_index < TEMP_INDEX_PRESET_1) || (target_color_temp_index >= TEMP_INDEX_PRESET_3)) target_color_temp_index = TEMP_INDEX_PRESET_1;
       else if ((target_color_temp_index >= TEMP_INDEX_PRESET_1) && (target_color_temp_index < TEMP_INDEX_PRESET_2)) target_color_temp_index = TEMP_INDEX_PRESET_2;
       else if ((target_color_temp_index >= TEMP_INDEX_PRESET_2) && (target_color_temp_index < TEMP_INDEX_PRESET_3)) target_color_temp_index = TEMP_INDEX_PRESET_3;
 
       if ((current_brightness_index != target_brightness_index) || (current_color_temp_index != target_color_temp_index)){
         xQueueSend(led_queue, &((led_message_t) {.event_sig = ANIM_TICK_SIG}), 0);
+        esp_err_t stop_ret = esp_timer_stop(storage_write_timer);
+        if (stop_ret != ESP_OK && stop_ret != ESP_ERR_INVALID_STATE) ESP_ERROR_CHECK(stop_ret);
+        ESP_ERROR_CHECK(esp_timer_start_once(storage_write_timer, STORAGE_WRITE_PERIOD));
       }
 
       break;
     }
 
-    case ANIM_TICK_SIG:
+    case ANIM_TICK_SIG:{
+      bool refresh = false;
+      
+      if (current_color_temp_index != target_color_temp_index){
+        if (current_color_temp_index < target_color_temp_index) current_color_temp_index++;
+        else if (current_color_temp_index > target_color_temp_index) current_color_temp_index--;
 
+        refresh = true;
+      }
+
+      base_color.red = color_temp_lookup[current_color_temp_index][0];
+      base_color.green = color_temp_lookup[current_color_temp_index][1];
+      base_color.blue = color_temp_lookup[current_color_temp_index][2];
+
+      if (current_brightness_index != target_brightness_index){
+        if (current_brightness_index < target_brightness_index) current_brightness_index++;
+        else if (current_brightness_index > target_brightness_index) current_brightness_index--;
+        refresh = true;
+      }
+
+      if (refresh){
+        rgb_t final_color = cct_apply_brightness(base_color, current_brightness_index);
+        for(int i = 0; i < LED_STRIP_COUNT; i++){ 
+          ESP_ERROR_CHECK(led_strip_set_pixel(led_strip, i, final_color.red, final_color.green, final_color.blue));
+        }
+
+        ESP_ERROR_CHECK(led_strip_refresh(led_strip));
+        esp_err_t stop_ret = esp_timer_stop(led_anim_timer);
+        if (stop_ret != ESP_OK && stop_ret != ESP_ERR_INVALID_STATE) ESP_ERROR_CHECK(stop_ret);
+        ESP_ERROR_CHECK(esp_timer_start_once(led_anim_timer, ANIMATION_PERIOD));
+      }
       break;
+    }
 
+    case STORAGE_SIG:{
+      ESP_ERROR_CHECK(nvs_set_u8(storage_handle, temp_index_key, target_color_temp_index));
+      ESP_ERROR_CHECK(nvs_set_u8(storage_handle, brightness_index_key, target_brightness_index));
+      ESP_ERROR_CHECK(nvs_commit(storage_handle));
+      break;
+    }
     default:
       break;
     }
   }
 }
 
-void storage_task(void *pvParameters) {
+void led_animation_callback(void *args){
+  xQueueSend(led_queue, &((led_message_t) {.event_sig = ANIM_TICK_SIG}), 0);
+}
 
-  while (1) {
-  }
+void storage_write_callback(void * args){
+  xQueueSend(led_queue, &((led_message_t) {.event_sig = STORAGE_SIG}), 0);
+}
+
+void app_main(void) {
+  storage_init();
+  led_queue = xQueueCreate(20, sizeof(led_message_t));
+
+  xTaskCreate(
+    &led_task,
+    "led task",
+    8192,
+    NULL,
+    2,
+    &led_task_handle
+  );
 }
