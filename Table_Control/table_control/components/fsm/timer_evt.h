@@ -102,7 +102,7 @@ void fsm_time_event_disarm(fsm_time_event *me);
  * reloaded with their interval.  Events are posted via ::fsm_post_from_isr
  * after the critical section is released.
  */
-void IRAM_ATTR fsm_tick(void);
+void fsm_tick(void);
 
 /**
  * @brief Initialise and start the periodic hardware tick timer.

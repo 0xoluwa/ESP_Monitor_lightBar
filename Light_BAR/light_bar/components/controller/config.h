@@ -24,7 +24,7 @@
 #define MAX_COLOR_TEMP_FRAME        64
 
 /** @brief Minimum allowable color-temperature frame index. */
-#define MIN_COLOR_TEMP_FRAME        20
+#define MIN_COLOR_TEMP_FRAME        15
 
 /** @brief Maximum allowable brightness frame index (full scale). */
 #define MAX_BRIGHTNESS_FRAME        255
