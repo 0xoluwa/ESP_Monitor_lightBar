@@ -9,14 +9,15 @@
 #ifndef __LIGHTBAR_CONTROLLER_H__
 #define __LIGHTBAR_CONTROLLER_H__
 
-#include "fsm.h"
+#include "config.h"
 #include "driver/gpio.h"
+#include "fsm.h"
 #include "led_strip.h"
 #include "nvs.h"
-#include <stdint.h>
-#include <stdbool.h>
-#include "config.h"
 #include "timer_evt.h"
+#include <stdbool.h>
+#include <stdint.h>
+
 
 /**
  * @brief HSV look-up table mapping CCT frame index to hue/saturation pairs.
@@ -33,12 +34,13 @@ extern const uint16_t color_temp_lookup[65][2];
  * framework-reserved signals (ENTRY / EXIT / INIT).
  */
 enum lightbar_signal {
-    SIG_POWER             = SIG_USER_CODE, /**< Power toggle (button or remote). */
-    SIG_COLOR_TEMP_PRESET,                 /**< Cycle through three CCT presets. */
-    SIG_COLOR_TEMP,                        /**< Continuous CCT adjustment carrying a signed delta. */
-    SIG_BRIGHTNESS,                        /**< Continuous brightness adjustment carrying a signed delta. */
-    SIG_ANIM_TICK,                         /**< 50 Hz animation tick driving smooth interpolation. */
-    SIG_MAX                                /**< Sentinel — total number of application signals. */
+  SIG_POWER = SIG_USER_CODE, /**< Power toggle (button or remote). */
+  SIG_COLOR_TEMP_PRESET,     /**< Cycle through three CCT presets. */
+  SIG_COLOR_TEMP, /**< Continuous CCT adjustment carrying a signed delta. */
+  SIG_BRIGHTNESS, /**< Continuous brightness adjustment carrying a signed delta.
+                   */
+  SIG_ANIM_TICK,  /**< 50 Hz animation tick driving smooth interpolation. */
+  SIG_MAX         /**< Sentinel — total number of application signals. */
 };
 
 /**
@@ -48,8 +50,8 @@ enum lightbar_signal {
  * ::SIG_COLOR_TEMP and ::SIG_BRIGHTNESS events.
  */
 typedef struct {
-    fsm_event super; /**< Base event — **must** be the first member. */
-    int16_t   delta; /**< Encoder step count; 0 for button-press signals. */
+  fsm_event super; /**< Base event — **must** be the first member. */
+  int16_t delta;   /**< Encoder step count; 0 for button-press signals. */
 } lightbar_event;
 
 /** @brief Forward declaration of the controller structure. */
@@ -62,19 +64,23 @@ typedef struct LIGHTBAR_CONTROLLER lightbar_controller;
  * `fsm *` freely throughout the FSM framework.
  */
 struct LIGHTBAR_CONTROLLER {
-    fsm            super;      /**< Base FSM — **must** be the first member. */
-    fsm_time_event anim_timer; /**< Periodic timer that fires ::SIG_ANIM_TICK. */
+  fsm super;                 /**< Base FSM — **must** be the first member. */
+  fsm_time_event anim_timer; /**< Periodic timer that fires ::SIG_ANIM_TICK. */
 
-    gpio_num_t         led_pin;      /**< GPIO driving the LED strip data line. */
-    led_strip_handle_t strip_handle; /**< Handle to the LED strip driver. */
+  gpio_num_t led_pin;              /**< GPIO driving the LED strip data line. */
+  led_strip_handle_t strip_handle; /**< Handle to the LED strip driver. */
 
-    int brt_target_frame; /**< Desired brightness frame index (animation destination). */
-    int cct_target_frame; /**< Desired CCT frame index (animation destination). */
+  int brt_target_frame; /**< Desired brightness frame index (animation
+                           destination). */
+  int cct_target_frame; /**< Desired CCT frame index (animation destination). */
 
-    int brt_curr_frame; /**< Current brightness frame index (interpolating toward target). */
-    int cct_cur_frame;  /**< Current CCT frame index (interpolating toward target). */
+  int brt_curr_frame; /**< Current brightness frame index (interpolating toward
+                         target). */
+  int cct_cur_frame; /**< Current CCT frame index (interpolating toward target).
+                      */
 
-    nvs_handle_t nvs; /**< NVS namespace handle kept open for the controller's lifetime. */
+  nvs_handle_t
+      nvs; /**< NVS namespace handle kept open for the controller's lifetime. */
 };
 
 /**
@@ -119,7 +125,8 @@ void post_power_button_isr(lightbar_controller *me);
 void post_color_temp_button(lightbar_controller *me);
 
 /**
- * @brief Post a continuous color-temperature adjustment event from task context.
+ * @brief Post a continuous color-temperature adjustment event from task
+ * context.
  * @param me    Pointer to the controller instance.
  * @param delta Signed step count from the rotary encoder.
  */
