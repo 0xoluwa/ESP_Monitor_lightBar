@@ -1,4 +1,5 @@
 {
+    "editor.formatOnSave": false,
     "C_Cpp.intelliSenseEngine": "disabled",
     "clangd.arguments": [
         "--compile-commands-dir=${workspaceFolder}/.pio/build/upesy_wroom",

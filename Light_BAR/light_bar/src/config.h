@@ -6,12 +6,27 @@
 #define __SRC_CONFIG_H__
 
 /** @brief GPIO pin connected to the WS2812 LED strip data line. */
-#define LED_STRIP_PIN    2
+#define LED_STRIP_PIN 2
+
+#define LED_STRIP_LED_COUNT 76
 
 /** @brief GPIO pin for the power toggle button. */
 #define POWER_BUTTON_PIN 5
 
 /** @brief GPIO pin for the color-temperature preset cycle button. */
-#define PRESET_TEMP_PIN  21
+#define PRESET_TEMP_PIN 21
+
+
+#define MIN_BRIGHTNESS_INDEX    10
+#define MAX_BRIGHTNESS_INDEX    200
+#define DEFAULT_BRIGHTNESS_INDEX    130
+
+#define MIN_TEMP_INDEX  20
+#define MAX_TEMP_INDEX  70
+#define DEFAULT_TEMP_INDEX  30
+
+#define TEMP_INDEX_PRESET_1 30
+#define TEMP_INDEX_PRESET_2 45
+#define TEMP_INDEX_PRESET_3 60
 
 #endif /* __SRC_CONFIG_H__ */
