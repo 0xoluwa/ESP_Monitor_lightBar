@@ -109,7 +109,6 @@ rgb_t cct_apply_brightness(rgb_t cct_rgb, uint8_t brightness) {
 }
 
 void led_task(void *pvParameters);
-void storage_task(void *pvParameters);
 
 void led_task(void *pvParameters) {
   uint8_t current_brightness_index = 0;
