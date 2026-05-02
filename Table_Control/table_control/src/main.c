@@ -36,7 +36,7 @@ static const char *TAG = "main";
 #define KNOB_FLUSH_MS    100
 
 /** @brief Minimum press duration in microseconds to be classified as a long press. */
-#define LONG_PRESS_US    2000000    /* 2 s */
+#define LONG_PRESS_US    1000000    /* 1 s */
 
 /** @brief Minimum press duration in microseconds for a valid short press (debounce floor). */
 #define SHORT_PRESS_US     50000   /* 50 ms */

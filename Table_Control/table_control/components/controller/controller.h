@@ -169,6 +169,6 @@ void post_knob_count(controller *me, int knob_count);
  * @param me             Controller instance.
  * @param press_duration Classified press length (::SHORT_PRESS or ::LONG_PRESS).
  */
-void IRAM_ATTR post_knob_button(controller *me, button_duration press_duration);
+void post_knob_button(controller *me, button_duration press_duration);
 
 #endif

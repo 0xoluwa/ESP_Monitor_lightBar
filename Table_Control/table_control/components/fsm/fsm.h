@@ -194,7 +194,7 @@ bool fsm_post(fsm *me, fsm_event const *event);
  * @param me    Target FSM.
  * @param event Pointer to the event to copy into the queue.
  */
-void IRAM_ATTR fsm_post_from_isr(fsm *me, fsm_event const * event);
+void fsm_post_from_isr(fsm *me, fsm_event const * event);
 
 /**
  * @brief FSM dispatch loop (FreeRTOS task entry point).
