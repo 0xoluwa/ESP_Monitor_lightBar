@@ -9,6 +9,7 @@
 #include "nvs_flash.h"
 #include "lookup_table.h"
 #include "esp_timer.h"
+#include "driver/gpio.h"
 
 
 TaskHandle_t led_task_handle = NULL;
@@ -19,6 +20,8 @@ esp_timer_handle_t led_anim_timer;
 esp_timer_handle_t storage_write_timer;
 
 nvs_handle_t storage_handle;
+
+static void gpio_setup(void);
 
 static void espnow_init(void);
 static void recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_t *data, int data_len);
@@ -251,6 +254,7 @@ void led_task(void *pvParameters) {
     }
 
     case STORAGE_SIG:{
+      if (power_state_ == OFF) break;
       ESP_ERROR_CHECK(nvs_set_u8(storage_handle, temp_index_key, target_color_temp_index));
       ESP_ERROR_CHECK(nvs_set_u8(storage_handle, brightness_index_key, target_brightness_index));
       ESP_ERROR_CHECK(nvs_commit(storage_handle));
@@ -270,21 +274,6 @@ void storage_write_callback(void * args){
   xQueueSend(led_queue, &((led_message_t) {.event_sig = STORAGE_SIG}), 0);
 }
 
-void app_main(void) {
-  storage_init();
-  led_queue = xQueueCreate(20, sizeof(led_message_t));
-  espnow_init();
-
-  xTaskCreate(
-    &led_task,
-    "led task",
-    8192,
-    NULL,
-    2,
-    &led_task_handle
-  );
-}
-
 void espnow_init(void)
 {
     /* NVS flash init occurred in main before this call. */
@@ -302,17 +291,6 @@ void espnow_init(void)
     ESP_ERROR_CHECK(esp_now_register_recv_cb(recv_cb));
 }
 
-/**
- * @brief ESP-NOW receive callback.
- *
- * Validates the packet length and forwards the payload to the controller as
- * the appropriate FSM event.  Packets with an unexpected length or unknown
- * type are silently discarded.
- *
- * @param esp_now_info Metadata about the received frame (sender MAC, RSSI, etc.).
- * @param data         Raw payload bytes.
- * @param data_len     Length of @p data in bytes.
- */
 static void recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_t *data, int data_len)
 {
     if (data_len != sizeof(app_pkt_t)) return;
@@ -339,4 +317,58 @@ static void recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_t *data
         default:
           break;
     }
+}
+
+static void IRAM_ATTR power_btn_isr(void *arg)
+{
+    static int64_t last_trigger_us = 0;
+    int64_t now = esp_timer_get_time();
+
+    if ((now - last_trigger_us) < BUTTON_DEBOUNCE_US) return;   // 50 ms guard
+    last_trigger_us = now;
+
+    xQueueSendFromISR(led_queue, &((led_message_t){.event_sig = POWER_SIG}), NULL);
+}
+
+static void IRAM_ATTR preset_btn_isr(void *arg)
+{
+    static int64_t last_trigger_us_preset = 0;
+    int64_t now = esp_timer_get_time();
+
+    if ((now - last_trigger_us_preset) < BUTTON_DEBOUNCE_US) return;   // 50 ms guard
+    last_trigger_us_preset = now;
+
+    xQueueSendFromISR(led_queue, &((led_message_t){.event_sig = COLOR_TEMP_SIG}), NULL);
+}
+
+static void gpio_setup(void)
+{
+    gpio_config_t io = {};
+    io.pin_bit_mask = (1ULL << PRESET_TEMP_PIN) | (1ULL << POWER_BUTTON_PIN);
+    io.mode         = GPIO_MODE_INPUT;
+    io.pull_up_en   = GPIO_PULLUP_ENABLE;
+    io.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    io.intr_type    = GPIO_INTR_NEGEDGE; /* trigger on falling edge (button press) */
+
+    ESP_ERROR_CHECK(gpio_config(&io));
+    ESP_ERROR_CHECK(gpio_install_isr_service(0));
+    ESP_ERROR_CHECK(gpio_isr_handler_add(POWER_BUTTON_PIN, power_btn_isr,  NULL));
+    ESP_ERROR_CHECK(gpio_isr_handler_add(PRESET_TEMP_PIN,  preset_btn_isr, NULL));
+}
+
+void app_main(void) {
+  storage_init();
+  led_queue = xQueueCreate(20, sizeof(led_message_t));
+  configASSERT(led_queue != NULL);
+  espnow_init();
+  gpio_setup();
+
+  xTaskCreate(
+    &led_task,
+    "led task",
+    8192,
+    NULL,
+    2,
+    &led_task_handle
+  );
 }

@@ -34,4 +34,6 @@
 
 #define ESPNOW_CHANNEL 1
 
+#define BUTTON_DEBOUNCE_US 10000
+
 #endif /* __SRC_CONFIG_H__ */
