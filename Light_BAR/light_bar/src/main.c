@@ -1,6 +1,6 @@
 #include "config.h"
 #include "esp_log.h"
-#include "esp_netif.h"
+#include "esp_now.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -19,6 +19,9 @@ esp_timer_handle_t led_anim_timer;
 esp_timer_handle_t storage_write_timer;
 
 nvs_handle_t storage_handle;
+
+static void espnow_init(void);
+static void recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_t *data, int data_len);
 
 const char * temp_index_key = "temp_index";
 const char * brightness_index_key = "brightness_index";
@@ -49,6 +52,30 @@ static int clip_range(int num, int min, int max){
   else return num;
 }
 
+/**
+ * @brief Packet type discriminator carried in every ::app_pkt_t frame.
+ */
+typedef enum __attribute__((packed)) {
+    PKT_BRIGHTNESS_EVENT = 0x01, /**< Rotary-encoder brightness step. */
+    PKT_COLOR_TEMP_EVENT = 0x02, /**< Rotary-encoder CCT step. */
+    PKT_KNOB_BUTTON      = 0x03, /**< Knob push-button press. */
+} pkt_type_t;
+
+/**
+ * @brief Fixed-size ESP-NOW application packet.
+ *
+ * Packed to ensure the sender and receiver agree on the exact byte layout
+ * regardless of compiler padding rules.
+ */
+typedef struct __attribute__((packed)) {
+    pkt_type_t type; /**< Identifies the event carried by this packet. */
+    uint8_t    seq;  /**< Sequence number (reserved for future deduplication). */
+    union {
+        int16_t knob_delta;        /**< Signed encoder step — valid for PKT_BRIGHTNESS_EVENT and PKT_COLOR_TEMP_EVENT. */
+        uint8_t knob_button_state; /**< Button state — valid for PKT_KNOB_BUTTON. */
+    };
+} app_pkt_t;
+
 typedef enum {
   ANIM_TICK_SIG,
   POWER_SIG,
@@ -62,7 +89,6 @@ typedef struct {
   signal event_sig;
   int brightness_index;
   int color_temp_index;
-  bool power_state;
 } led_message_t;
 
 typedef enum {
@@ -121,7 +147,7 @@ void led_task(void *pvParameters) {
   if (ret == ESP_ERR_NVS_NOT_FOUND) {
     target_color_temp_index = DEFAULT_TEMP_INDEX;
     ESP_ERROR_CHECK(nvs_set_u8(storage_handle, temp_index_key, DEFAULT_TEMP_INDEX));
-    nvs_commit(storage_handle);
+    ESP_ERROR_CHECK(nvs_commit(storage_handle));
   }
   else ESP_ERROR_CHECK(ret);
 
@@ -129,7 +155,7 @@ void led_task(void *pvParameters) {
   if (ret == ESP_ERR_NVS_NOT_FOUND){
     target_brightness_index = DEFAULT_BRIGHTNESS_INDEX;
     ESP_ERROR_CHECK(nvs_set_u8(storage_handle, brightness_index_key, DEFAULT_BRIGHTNESS_INDEX));
-    nvs_commit(storage_handle);
+    ESP_ERROR_CHECK(nvs_commit(storage_handle));
   }
   else ESP_ERROR_CHECK(ret);
 
@@ -139,7 +165,7 @@ void led_task(void *pvParameters) {
     case POWER_SIG:{
       esp_err_t stop_ret = esp_timer_stop(storage_write_timer);
       if (stop_ret != ESP_OK && stop_ret != ESP_ERR_INVALID_STATE) ESP_ERROR_CHECK(stop_ret);
-      
+
       if (power_state_ == ON){
         target_brightness_index = 0;
 
@@ -247,6 +273,7 @@ void storage_write_callback(void * args){
 void app_main(void) {
   storage_init();
   led_queue = xQueueCreate(20, sizeof(led_message_t));
+  espnow_init();
 
   xTaskCreate(
     &led_task,
@@ -256,4 +283,60 @@ void app_main(void) {
     2,
     &led_task_handle
   );
+}
+
+void espnow_init(void)
+{
+    /* NVS flash init occurred in main before this call. */
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_start());
+    ESP_ERROR_CHECK(esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE));
+    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE)); /* disable power-save — ESP-NOW needs radio always-on */
+
+    ESP_ERROR_CHECK(esp_now_init());
+    ESP_ERROR_CHECK(esp_now_register_recv_cb(recv_cb));
+}
+
+/**
+ * @brief ESP-NOW receive callback.
+ *
+ * Validates the packet length and forwards the payload to the controller as
+ * the appropriate FSM event.  Packets with an unexpected length or unknown
+ * type are silently discarded.
+ *
+ * @param esp_now_info Metadata about the received frame (sender MAC, RSSI, etc.).
+ * @param data         Raw payload bytes.
+ * @param data_len     Length of @p data in bytes.
+ */
+static void recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_t *data, int data_len)
+{
+    if (data_len != sizeof(app_pkt_t)) return;
+    const app_pkt_t *msg = (const app_pkt_t *)data;
+    led_message_t message = {0};
+    switch (msg->type) {
+        case PKT_BRIGHTNESS_EVENT:
+          message.brightness_index = msg->knob_delta;
+          message.event_sig = KNOB_SIG;
+          xQueueSend(led_queue, &message, 0);
+          break;
+
+        case PKT_COLOR_TEMP_EVENT:
+          message.color_temp_index = msg->knob_delta;
+          message.event_sig = KNOB_SIG;
+          xQueueSend(led_queue, &message, 0);
+          break;
+
+        case PKT_KNOB_BUTTON:
+          message.event_sig = POWER_SIG;
+          xQueueSend(led_queue, &message, 0);
+          break;
+
+        default:
+          break;
+    }
 }
