@@ -89,6 +89,9 @@ void led_task(void *pvParameters) {
   uint8_t target_color_temp_index = 0;
   power_state power_state_ = OFF;
   rgb_t base_color;
+  base_color.red = color_temp_lookup[current_color_temp_index][0];
+  base_color.green = color_temp_lookup[current_color_temp_index][1];
+  base_color.blue = color_temp_lookup[current_color_temp_index][2];
 
   led_message_t led_message = {0};
   led_strip_handle_t led_strip = NULL;
@@ -118,6 +121,7 @@ void led_task(void *pvParameters) {
   if (ret == ESP_ERR_NVS_NOT_FOUND) {
     target_color_temp_index = DEFAULT_TEMP_INDEX;
     ESP_ERROR_CHECK(nvs_set_u8(storage_handle, temp_index_key, DEFAULT_TEMP_INDEX));
+    nvs_commit(storage_handle);
   }
   else ESP_ERROR_CHECK(ret);
 
@@ -125,12 +129,9 @@ void led_task(void *pvParameters) {
   if (ret == ESP_ERR_NVS_NOT_FOUND){
     target_brightness_index = DEFAULT_BRIGHTNESS_INDEX;
     ESP_ERROR_CHECK(nvs_set_u8(storage_handle, brightness_index_key, DEFAULT_BRIGHTNESS_INDEX));
+    nvs_commit(storage_handle);
   }
   else ESP_ERROR_CHECK(ret);
-
-  if ((current_brightness_index != target_brightness_index) || (current_color_temp_index != target_color_temp_index)){
-    xQueueSend(led_queue, &((led_message_t) {.event_sig = ANIM_TICK_SIG}), 0);
-  }
 
   while (1) {
     xQueueReceive(led_queue, &led_message, portMAX_DELAY);
@@ -138,7 +139,7 @@ void led_task(void *pvParameters) {
     case POWER_SIG:{
       esp_err_t stop_ret = esp_timer_stop(storage_write_timer);
       if (stop_ret != ESP_OK && stop_ret != ESP_ERR_INVALID_STATE) ESP_ERROR_CHECK(stop_ret);
-
+      
       if (power_state_ == ON){
         target_brightness_index = 0;
 
@@ -159,6 +160,7 @@ void led_task(void *pvParameters) {
 
     case KNOB_SIG:{
       if (power_state_ == OFF) break;
+      
       target_brightness_index = clip_range((target_brightness_index + led_message.brightness_index), MIN_BRIGHTNESS_INDEX, MAX_BRIGHTNESS_INDEX);
       target_color_temp_index = clip_range((target_color_temp_index + led_message.color_temp_index), MIN_TEMP_INDEX, MAX_TEMP_INDEX);
 
@@ -195,12 +197,12 @@ void led_task(void *pvParameters) {
         if (current_color_temp_index < target_color_temp_index) current_color_temp_index++;
         else if (current_color_temp_index > target_color_temp_index) current_color_temp_index--;
 
+        base_color.red = color_temp_lookup[current_color_temp_index][0];
+        base_color.green = color_temp_lookup[current_color_temp_index][1];
+        base_color.blue = color_temp_lookup[current_color_temp_index][2];
+
         refresh = true;
       }
-
-      base_color.red = color_temp_lookup[current_color_temp_index][0];
-      base_color.green = color_temp_lookup[current_color_temp_index][1];
-      base_color.blue = color_temp_lookup[current_color_temp_index][2];
 
       if (current_brightness_index != target_brightness_index){
         if (current_brightness_index < target_brightness_index) current_brightness_index++;
