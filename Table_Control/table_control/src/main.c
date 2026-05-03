@@ -1,201 +1,258 @@
-/**
- * @file main.c
- * @brief Application entry point for the table controller.
- *
- * Owns hardware initialisation and hands off all runtime behaviour to the
- * controller FSM and FreeRTOS callbacks.  The boot sequence is:
- *
- *  1. fsm_tick_init()     – start the 1 ms hardware timer that drives all
- *                           FSM software timers (including the idle timer).
- *  2. controller_ctor()   – construct the controller FSM and idle timer event.
- *  3. controller_init()   – configure RGB LEDs, bring up ESP-NOW, start FSM task.
- *  4. knob_setup()        – configure encoder GPIOs and start the poll timer.
- *  5. knob_button_setup() – configure button GPIO and install the edge ISR.
- *
- * After app_main returns the FreeRTOS scheduler runs the FSM task and the
- * knob poll timer indefinitely.
- */
-
 #include "freertos/FreeRTOS.h"
-#include "freertos/timers.h"
-#include "knob.h"
-#include "config.h"
+#include "freertos/queue.h"
+#include "freertos/task.h"
 #include "esp_timer.h"
-#include "controller.h"
-#include "connection_setup.h"
-#include "timer_evt.h"
 #include "driver/gpio.h"
+#include "esp_now.h"
+#include "config.h"
+#include "esp_wifi.h"
+#include "nvs_flash.h"
+#include "esp_sleep.h"
 #include "esp_log.h"
+#include <string.h>
+#include "driver/rtc_io.h"
 
-static const char *TAG = "main";
+#define TAG "connection"
 
-/** @brief FreeRTOS poll timer period in milliseconds. */
-#define KNOB_POLL_MS     2
+typedef enum __attribute__((packed)){
+    PKT_BRIGHTNESS_EVENT = 0x01,
+    PKT_TEMP_EVENT     = 0x02,
+    PKT_KNOB_BUTTON      = 0x03,
+} pkt_type_t;
 
-/** @brief Accumulated delta is flushed to the FSM every this many ms (debounce window). */
-#define KNOB_FLUSH_MS    100
-
-/** @brief Minimum press duration in microseconds to be classified as a long press. */
-#define LONG_PRESS_US    1000000    /* 1 s */
-
-/** @brief Minimum press duration in microseconds for a valid short press (debounce floor). */
-#define SHORT_PRESS_US     50000   /* 50 ms */
-
-/** @brief Handle for the FreeRTOS software timer that drives the encoder poll. */
-static TimerHandle_t    knob_timer_handle;
-
-/** @brief One-shot FreeRTOS timer that fires after LONG_PRESS_US to post LONG_PRESS early. */
-static TimerHandle_t    long_press_timer_handle;
-
-/** @brief Encoder state machine handle. */
-static encoder_handle_t knob_handle;
-
-/** @brief Global controller FSM instance. */
-controller       device;
-
-
-/* ── Encoder poll timer ───────────────────────────────────────────────────── */
-
-/**
- * @brief FreeRTOS timer callback – poll the encoder and flush accumulated delta.
- *
- * Called every ::KNOB_POLL_MS milliseconds by the FreeRTOS timer task.
- * Ticks the encoder state machine on every call; flushes the accumulated
- * delta to the controller FSM once per ::KNOB_FLUSH_MS window.
- *
- * A flush window of 100 ms means up to 50 poll samples are batched before
- * a ::SIG_KNOB event is posted, providing natural debouncing without
- * introducing noticeable latency for the user.
- *
- * @param xTimer FreeRTOS timer handle (unused).
- */
-static void knob_cb(TimerHandle_t xTimer) {
-    static uint32_t last_flush_ms = 0;
-
-    encoder_handle_tick(&knob_handle);
-
-    uint32_t now_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
-    if ((now_ms - last_flush_ms) >= KNOB_FLUSH_MS) {
-        last_flush_ms = now_ms;
-        int16_t delta = (int16_t)encoder_read_and_clear(&knob_handle);
-        if (delta != 0) {
-            post_knob_count(&device, delta);
-        }
-    }
-}
-
-/**
- * @brief Configure encoder GPIO pins and start the poll timer.
- *
- * Sets both encoder pins as digital inputs with internal pull-ups enabled.
- * The encoder library does not configure GPIOs itself; they must be ready
- * before ::encoder_fsm_init reads the initial pin state.
- *
- * Creates and starts a periodic FreeRTOS timer that fires every
- * ::KNOB_POLL_MS milliseconds to call ::knob_cb.
- */
-static void knob_setup(void) {
-    gpio_config_t enc_cfg = {
-        .pin_bit_mask = (1ULL << KNOB_CLK_PIN) | (1ULL << KNOB_DATA_PIN),
-        .mode         = GPIO_MODE_INPUT,
-        .pull_up_en   = GPIO_PULLUP_ENABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type    = GPIO_INTR_DISABLE,
+typedef struct __attribute__((packed)){
+    pkt_type_t type;
+    uint8_t    seq;
+    union{
+        int16_t knob_delta;
+        uint8_t knob_button_state;
     };
-    gpio_config(&enc_cfg);
+} app_pkt_t;
+static void send_packet(app_pkt_t * const pkt);
 
-    encoder_fsm_ctor(&knob_handle, KNOB_CLK_PIN, KNOB_DATA_PIN);
-    encoder_fsm_init(&knob_handle);
+static const uint8_t LIGHTBAR_MAC[ESP_NOW_ETH_ALEN] = {0xB4, 0xBF, 0xE9, 0x15, 0xA6, 0xD4};
 
-    knob_timer_handle = xTimerCreate("knob",
-                                     pdMS_TO_TICKS(KNOB_POLL_MS),
-                                     pdTRUE, NULL, knob_cb);
-    xTimerStart(knob_timer_handle, 0);
+static uint8_t s_seq = 0;
+
+static QueueHandle_t s_send_queue;
+
+static void espnow_init();
+
+typedef enum{
+    BRIGHT,
+    TEMP
+} knob_state_t;
+
+typedef enum{
+    KNOB_DELTA_SIG,
+    BTN_SHORT_PRESS,
+    BTN_LONG_PRESS,
+    ARM_LONG_BTN_SIG,
+    DISARM_LONG_BTN_SIG,
+    ENTER_SLEEP_SIG,
+    MAX_SIGNAL
+} signal_t;
+
+typedef struct{
+    signal_t signal;
+    int16_t knob_delta;
+} knob_message_t;
+
+
+static TaskHandle_t controller_handle;
+static void controller_task(void *param);
+static QueueHandle_t controller_queue = NULL;
+
+esp_timer_handle_t knob_timer_handle;
+esp_timer_handle_t sleep_timer_handle;
+esp_timer_handle_t long_press_handle;
+static void post_timeout_init(esp_timer_handle_t *timer_handle, esp_timer_cb_t call_back, const char * timer_name);
+static void knob_callback(void * args);
+static void sleep_mode_callback(void * args);
+static void disable_time_event(esp_timer_handle_t *timer_handle);
+static inline void encoder_handle_tick(void);
+
+static void knob_button_setup(void);
+static void knob_button_isr(void *arg);
+static void post_long_press_event(void * args);
+static void encoder_pins_setup(void);
+
+void app_main(void){
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+
+    controller_queue = xQueueCreate(20, sizeof(knob_message_t));
+    configASSERT(controller_queue != NULL);
+    encoder_pins_setup();
+    knob_button_setup();
+
+    xTaskCreate(controller_task, "controller", 8192, NULL, 2, &controller_handle);
 }
 
+static void controller_task(void *param){
+    knob_state_t knob_state = BRIGHT;
+    knob_message_t message = {0};
 
-/* ── Button ISR ───────────────────────────────────────────────────────────── */
+    espnow_init();
+    post_timeout_init(&knob_timer_handle, knob_callback, "Knob timer");
+    ESP_ERROR_CHECK(esp_timer_start_periodic(knob_timer_handle, KNOB_POLL_PERIOD_US));
 
-/** @brief Timestamp of the most recent falling edge, in microseconds. */
-static volatile int64_t btn_press_start_us = 0;
+    post_timeout_init(&sleep_timer_handle, sleep_mode_callback, "sleep timer");
+    ESP_ERROR_CHECK(esp_timer_start_once(sleep_timer_handle, SLEEP_PERIOD_US));
 
-/** @brief Set to true by the long-press timer callback once LONG_PRESS has been posted. */
-static volatile bool    long_press_fired   = false;
+    post_timeout_init(&long_press_handle, post_long_press_event, "long press");
 
-/**
- * @brief FreeRTOS timer callback – posts LONG_PRESS while the button is still held.
- *
- * Armed on every falling edge with a period of ::LONG_PRESS_US.  If the button
- * is still down when the timer expires this callback fires in the timer task,
- * posts ::LONG_PRESS immediately, and sets ::long_press_fired so the subsequent
- * rising edge does not re-classify the press.
- *
- * @param xTimer FreeRTOS timer handle (unused).
- */
-static void long_press_timer_cb(TimerHandle_t xTimer) {
-    long_press_fired = true;
-    post_knob_button(&device, LONG_PRESS);
-}
+    for (;;){
+        xQueueReceive(controller_queue, &message, portMAX_DELAY);
+        switch (message.signal){
+            case KNOB_DELTA_SIG : {
+                int knob_delta = message.knob_delta;
+                pkt_type_t signal_type = (knob_state == BRIGHT)? PKT_BRIGHTNESS_EVENT : PKT_TEMP_EVENT;
+                app_pkt_t pkt = {
+                    .type = signal_type,
+                    .knob_delta = knob_delta
+                };
 
-/**
- * @brief GPIO ISR – classifies button presses with early long-press detection.
- *
- * Triggered on both edges of the button GPIO (active-low with pull-up).
- *
- *  - **Falling edge** (level = 0): record press start and arm the one-shot
- *    ::long_press_timer_handle for ::LONG_PRESS_US.
- *  - **Rising edge**  (level = 1): disarm the timer, then:
- *    - If ::long_press_fired – the press was already reported; do nothing.
- *    - Else if duration >= ::SHORT_PRESS_US → post ::SHORT_PRESS.
- *    - Else – noise/glitch; discard.
- *
- * @param arg Unused GPIO ISR argument.
- */
-static void IRAM_ATTR knob_button_isr(void *arg) {
-    BaseType_t higher_woken = pdFALSE;
-    int64_t now   = esp_timer_get_time();
-    int     level = gpio_get_level((gpio_num_t)KNOB_BUTTON_PIN);
+                send_packet(&pkt);
+                disable_time_event(&sleep_timer_handle);
+                ESP_ERROR_CHECK(esp_timer_start_once(sleep_timer_handle, SLEEP_PERIOD_US));
+                break;
+            }
 
-    if (level == 0) {
-        /* Falling edge – arm the long-press timer */
-        btn_press_start_us = now;
-        long_press_fired   = false;
-        xTimerStartFromISR(long_press_timer_handle, &higher_woken);
-    } else {
-        /* Rising edge – disarm timer; classify only if long press not yet fired */
-        xTimerStopFromISR(long_press_timer_handle, &higher_woken);
+            case BTN_SHORT_PRESS : {
+                knob_state = (knob_state == BRIGHT)? TEMP : BRIGHT;
+                disable_time_event(&sleep_timer_handle);
+                ESP_ERROR_CHECK(esp_timer_start_once(sleep_timer_handle, SLEEP_PERIOD_US));
+                break;
+            }
 
-        if (btn_press_start_us != 0) {
-            int64_t duration   = now - btn_press_start_us;
-            btn_press_start_us = 0;
+            case BTN_LONG_PRESS : {
+                app_pkt_t pkt = {
+                    .type = PKT_KNOB_BUTTON,
+                    .knob_button_state = 1
+                };
 
-            if (!long_press_fired && duration >= SHORT_PRESS_US)
-                post_knob_button(&device, SHORT_PRESS);
-            /* else: long press already posted, or glitch – discard */
+                send_packet(&pkt);
+                disable_time_event(&sleep_timer_handle);
+                ESP_ERROR_CHECK(esp_timer_start_once(sleep_timer_handle, SLEEP_PERIOD_US));
+                break;
+            }
+
+            case ARM_LONG_BTN_SIG: {
+                ESP_ERROR_CHECK(esp_timer_start_once(long_press_handle, KNOB_BTN_LONG_PRESS_PERIOD));
+                break;
+            }
+
+            case DISARM_LONG_BTN_SIG: {
+                disable_time_event(&long_press_handle);
+                break;
+            }
+
+            case ENTER_SLEEP_SIG: {
+                int dt_level = gpio_get_level(KNOB_DT_PIN);
+                int wake_level = (dt_level == 1) ? 0 : 1;
+                ESP_ERROR_CHECK(esp_sleep_enable_ext0_wakeup((gpio_num_t)KNOB_DT_PIN, wake_level));
+                ESP_ERROR_CHECK(esp_sleep_enable_ext1_wakeup((1ULL << KNOB_BTN_PIN), ESP_EXT1_WAKEUP_ALL_LOW));
+                ESP_ERROR_CHECK(rtc_gpio_pullup_en((gpio_num_t)KNOB_BTN_PIN));
+                ESP_ERROR_CHECK(rtc_gpio_pulldown_dis((gpio_num_t)KNOB_BTN_PIN));
+                ESP_ERROR_CHECK(rtc_gpio_pullup_en((gpio_num_t)KNOB_DT_PIN));
+                ESP_ERROR_CHECK(rtc_gpio_pulldown_dis((gpio_num_t)KNOB_DT_PIN));
+                esp_deep_sleep_start();
+                break;
+            }
+
+
+            default:
+                break;
+
         }
     }
-    portYIELD_FROM_ISR(higher_woken);
 }
 
-/**
- * @brief Configure the button GPIO and install the edge-triggered ISR.
- *
- * Creates the one-shot ::long_press_timer_handle (period = ::LONG_PRESS_US)
- * used for early long-press detection, then sets ::KNOB_BUTTON_PIN as an
- * input with an internal pull-up and registers ::knob_button_isr on any edge.
- *
- * Installs the GPIO ISR service (shared across all GPIO ISRs) and
- * registers ::knob_button_isr for this pin.
- */
-static void knob_button_setup(void) {
-    long_press_timer_handle = xTimerCreate("lp_btn",
-                                           pdMS_TO_TICKS(LONG_PRESS_US / 1000),
-                                           pdFALSE,             /* one-shot */
-                                           NULL,
-                                           long_press_timer_cb);
+static void post_long_press_event(void * args){
+    knob_message_t message = {.signal = BTN_LONG_PRESS};
+    xQueueSend(controller_queue, &message, 0);
+}
 
+static void post_timeout_init(esp_timer_handle_t *timer_handle, esp_timer_cb_t call_back, const char * timer_name){
+    esp_timer_create_args_t timer_cfg = {
+        .callback = call_back,
+        .arg = NULL,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = timer_name,
+        .skip_unhandled_events = true
+    };
+
+    ESP_ERROR_CHECK(esp_timer_create(&timer_cfg, timer_handle));
+}
+
+static void disable_time_event(esp_timer_handle_t *timer_handle){
+    esp_err_t stop_ret = esp_timer_stop(*timer_handle);
+    if (stop_ret != ESP_OK && stop_ret != ESP_ERR_INVALID_STATE) ESP_ERROR_CHECK(stop_ret);
+}
+
+static void knob_callback(void * args){
+    encoder_handle_tick();
+}
+
+static void sleep_mode_callback(void *args) {
+    knob_message_t message = {.signal = ENTER_SLEEP_SIG};
+    xQueueSend(controller_queue, &message, 0);
+}
+
+typedef enum {
+    ENC_S0 = 0, // A=0 B=0
+    ENC_S1 = 1, // A=0 B=1 
+    ENC_S2 = 2, // A=1 B=0
+    ENC_S3 = 3, // A=1 B=1 – detent position; counts are registered here.
+} enc_state_t;
+
+static const int8_t knob_lookup[4][4] = {
+//  curr:  S0   S1   S2   S3
+/* S0 */  { 0,   0,   0,  99 },
+/* S1 */  { 0,   0,  99,  -1 },
+/* S2 */  { 0,  99,   0,  +1 },
+/* S3 */  {99,   0,   0,   0 },
+};
+
+static inline void encoder_handle_tick(void) {
+    static enc_state_t previous_state = ENC_S0;
+    static int16_t knob_delta_ = 0;
+
+    uint8_t a = gpio_get_level(KNOB_DT_PIN);
+    uint8_t b = gpio_get_level(KNOB_CLK_PIN);
+
+    enc_state_t next_state = (enc_state_t)((a << 1) | b);
+
+    int8_t step = knob_lookup[previous_state][next_state];
+
+    if (step == 99) {
+        return;
+    }
+
+    knob_delta_ += step;
+    previous_state  = next_state;
+
+    static uint64_t last_flush_us = 0;
+    uint64_t now_us = esp_timer_get_time();
+
+    if ((now_us - last_flush_us) >= KNOB_DELTA_FLUSH_US) {
+        last_flush_us = now_us;
+        if (knob_delta_ != 0) {
+            knob_message_t message = {.signal = KNOB_DELTA_SIG, .knob_delta = knob_delta_};
+            xQueueSend(controller_queue, &message, 0);
+            knob_delta_ = 0;
+        }
+    }
+}
+
+static void knob_button_setup(void) {
     gpio_config_t cfg = {
-        .pin_bit_mask = (1ULL << KNOB_BUTTON_PIN),
+        .pin_bit_mask = (1ULL << KNOB_BTN_PIN),
         .mode         = GPIO_MODE_INPUT,
         .pull_up_en   = GPIO_PULLUP_ENABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
@@ -203,24 +260,106 @@ static void knob_button_setup(void) {
     };
     gpio_config(&cfg);
     ESP_ERROR_CHECK(gpio_install_isr_service(0));
-    gpio_isr_handler_add((gpio_num_t)KNOB_BUTTON_PIN, knob_button_isr, NULL);
+    ESP_ERROR_CHECK(gpio_isr_handler_add((gpio_num_t)KNOB_BTN_PIN, knob_button_isr, NULL));
+}
+
+static void encoder_pins_setup(void) {
+    gpio_config_t cfg = {
+        .pin_bit_mask = (1ULL << KNOB_DT_PIN) | (1ULL << KNOB_CLK_PIN),
+        .mode         = GPIO_MODE_INPUT,
+        .pull_up_en   = GPIO_PULLUP_DISABLE,  // encoder module has external pull-ups
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type    = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&cfg);
+}
+
+static void IRAM_ATTR knob_button_isr(void *arg) {
+    static bool isLongBtnTimeoutArmed = false;
+    BaseType_t taskWoken = pdFALSE;
+    int64_t now = esp_timer_get_time();
+    static int64_t last_press = 0;
+    int level = gpio_get_level(KNOB_BTN_PIN);
+
+    if (level == 0){
+        if ((now - last_press) < KNOB_BTN_DEBOUNCE_US) return; 
+        last_press = now;
+        if (!isLongBtnTimeoutArmed){
+            knob_message_t message = {.signal = ARM_LONG_BTN_SIG};
+            xQueueSendFromISR(controller_queue, &message, &taskWoken);
+            isLongBtnTimeoutArmed = true;
+        }
+    }
+    else{
+        if (isLongBtnTimeoutArmed) {
+            knob_message_t msg = {.signal = DISARM_LONG_BTN_SIG};
+            xQueueSendFromISR(controller_queue, &msg, &taskWoken);
+            isLongBtnTimeoutArmed = false;
+        }
+        int64_t difference = (now - last_press);
+        if ((difference >= KNOB_BTN_DEBOUNCE_US) && (difference < SHORT_BTN_MAX_PERIOD)) {
+            knob_message_t message = {0};
+            message = (knob_message_t) {.signal = BTN_SHORT_PRESS};
+            xQueueSendFromISR(controller_queue, &message, &taskWoken);
+            isLongBtnTimeoutArmed = false;
+        }
+    }
+
+    if (taskWoken) portYIELD_FROM_ISR(taskWoken);
+}
+
+static void send_cb(const uint8_t *mac, esp_now_send_status_t status) {
+    (void) mac;
+    if (status == ESP_NOW_SEND_SUCCESS) {
+        ESP_LOGI(TAG, "send ACK ✓");
+    } else {
+        ESP_LOGW(TAG, "send FAIL — lightbar not ACKing (wrong channel or not running?)");
+    }
+}
+
+static void sender_task(void *pv){
+    app_pkt_t pkt;
+    for (;;) {
+        xQueueReceive(s_send_queue, &pkt, portMAX_DELAY);
+        esp_err_t err = esp_now_send(LIGHTBAR_MAC, (const uint8_t *)&pkt, sizeof(pkt));
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "seq=%u send failed: %s", pkt.seq, esp_err_to_name(err));
+        }
+    }
+}
+
+static void espnow_init(){
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_start());
+    ESP_ERROR_CHECK(esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE));
+    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));   /* disable power-save — ESP-NOW needs radio always-on */
+
+    ESP_ERROR_CHECK(esp_now_init());
+    ESP_ERROR_CHECK(esp_now_register_send_cb(send_cb));
+
+    esp_now_peer_info_t peer = {
+        .channel = ESPNOW_CHANNEL,
+        .encrypt = false,
+        .ifidx   = ESP_IF_WIFI_STA
+    };
+    memcpy(peer.peer_addr, LIGHTBAR_MAC, ESP_NOW_ETH_ALEN);
+    ESP_ERROR_CHECK(esp_now_add_peer(&peer));
+
+    s_send_queue = xQueueCreate(8, sizeof(app_pkt_t));
+    configASSERT(s_send_queue);
+    configASSERT(xTaskCreate(sender_task, "espnow_sender", 4096, NULL, 1, NULL));
+}
+
+static void send_packet(app_pkt_t * const pkt){
+    pkt->seq = s_seq++;
+    if (xQueueSend(s_send_queue, pkt, 0) != pdTRUE) {
+        ESP_LOGW(TAG, "seq=%u send queue full, dropped", pkt->seq);
+    }
 }
 
 
-/* ── Entry point ──────────────────────────────────────────────────────────── */
-
-/**
- * @brief FreeRTOS application entry point.
- *
- * Performs the full hardware and software initialisation sequence then
- * returns, leaving the scheduler to drive the FSM task and timer callbacks.
- */
-void app_main(void) {
-    ESP_LOGI(TAG, "=== table controller booting ===");
-    fsm_tick_init(1000);
-    ESP_LOGI(TAG, "tick timer started (1 ms)");
-    controller_ctor(&device);
-    controller_init(&device, "controller");
-    knob_setup();
-    knob_button_setup();
-}
