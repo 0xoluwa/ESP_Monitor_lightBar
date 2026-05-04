@@ -16,6 +16,8 @@
 /** @brief GPIO pin for the color-temperature preset cycle button. */
 #define PRESET_TEMP_PIN 21
 
+#define LED_STRIP_POWER_PIN 21
+
 
 #define MIN_BRIGHTNESS_INDEX   (uint8_t ) 20
 #define MAX_BRIGHTNESS_INDEX   (uint8_t ) 255

@@ -40,6 +40,8 @@ static rgb_t cct_apply_brightness(rgb_t cct_rgb, uint8_t brightness);
 static inline void restart_time_event(esp_timer_handle_t timer_handle, uint64_t timeout_us);
 static inline void colorTempIndex_to_RGB(uint8_t color_temp_index, rgb_t *rgb);
 static inline int range_map(int x, int in_min, int in_max, int out_min, int out_max);
+static inline void turn_led_strip_on();
+static inline void turn_led_strip_off();
 
 
 void led_task(void *pvParameters);
@@ -142,6 +144,7 @@ void led_task(void *pvParameters) {
   configASSERT(target_brightness_index <= MAX_RANGE);
 
   colorTempIndex_to_RGB(target_color_temp_index, &base_color);
+  turn_led_strip_off();
 
   while (1) {
     xQueueReceive(led_message_queue, &led_message, portMAX_DELAY);
@@ -159,7 +162,7 @@ void led_task(void *pvParameters) {
 
           target_brightness_index = 0;
           power_state_ = OFF;
-          //also turn of the led power to stop it from consuming any power
+          turn_led_strip_off();
         } else{
             power_state_ = ON;
 
@@ -167,7 +170,7 @@ void led_task(void *pvParameters) {
             ESP_ERROR_CHECK(nvs_get_u8(storage_nvs_handle, nvs_brightness_index_key, &target_brightness_index));
             configASSERT(target_color_temp_index <= MAX_RANGE);
             configASSERT(target_brightness_index <= MAX_RANGE);
-            //turn led power on  
+            turn_led_strip_on(); 
         }
 
         if ((current_brightness_index != target_brightness_index) || (current_color_temp_index != target_color_temp_index)){
@@ -348,6 +351,13 @@ static void gpio_setup(void)
     ESP_ERROR_CHECK(gpio_install_isr_service(0));
     ESP_ERROR_CHECK(gpio_isr_handler_add(POWER_BUTTON_PIN, power_btn_isr,  NULL));
     ESP_ERROR_CHECK(gpio_isr_handler_add(PRESET_TEMP_PIN,  preset_btn_isr, NULL));
+
+    io.pull_up_en = GPIO_PULLUP_DISABLE;
+    io.pull_down_en = GPIO_PULLDOWN_ENABLE;
+    io.pin_bit_mask = (1ULL << LED_STRIP_POWER_PIN);
+    io.mode = GPIO_MODE_OUTPUT;
+
+    ESP_ERROR_CHECK(gpio_config(&io));
 }
 
 static inline void esptimer_setup(esp_timer_handle_t *timer_handle, esp_timer_cb_t user_callback, const char * timer_name){
@@ -419,6 +429,12 @@ static inline void colorTempIndex_to_RGB(uint8_t color_temp_index, rgb_t *rgb){
 }
 
 static inline int range_map(int x, int in_min, int in_max, int out_min, int out_max) {
-  return (int)((x - in_min) * (out_max - out_min) / (float)(in_max - in_min) + out_min);
+  return ((x - in_min) * (out_max - out_min)) / (in_max - in_min) + out_min;
 }
 
+static inline void turn_led_strip_on(){
+  ESP_ERROR_CHECK(gpio_set_level(LED_STRIP_POWER_PIN, 1));
+}
+static inline void turn_led_strip_off(){
+  ESP_ERROR_CHECK(gpio_set_level(LED_STRIP_POWER_PIN, 0));
+}
