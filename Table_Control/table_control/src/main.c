@@ -86,6 +86,12 @@ void app_main(void){
     }
     ESP_ERROR_CHECK(ret);
 
+    /* Clear RTC GPIO settings from deep sleep to avoid power consumption/erratic behavior */
+    ESP_ERROR_CHECK(rtc_gpio_pullup_dis((gpio_num_t)KNOB_BTN_PIN));
+    ESP_ERROR_CHECK(rtc_gpio_pulldown_dis((gpio_num_t)KNOB_BTN_PIN));
+    ESP_ERROR_CHECK(rtc_gpio_pullup_dis((gpio_num_t)KNOB_DT_PIN));
+    ESP_ERROR_CHECK(rtc_gpio_pulldown_dis((gpio_num_t)KNOB_DT_PIN));
+
     controller_queue = xQueueCreate(20, sizeof(knob_message_t));
     configASSERT(controller_queue != NULL);
 
