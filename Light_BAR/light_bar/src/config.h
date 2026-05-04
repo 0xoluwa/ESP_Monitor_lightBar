@@ -17,17 +17,21 @@
 #define PRESET_TEMP_PIN 21
 
 
-#define MIN_BRIGHTNESS_INDEX    10
-#define MAX_BRIGHTNESS_INDEX    200
-#define DEFAULT_BRIGHTNESS_INDEX    130
+#define MIN_BRIGHTNESS_INDEX   (uint8_t ) 20
+#define MAX_BRIGHTNESS_INDEX   (uint8_t ) 255
+#define DEFAULT_BRIGHTNESS_INDEX    (uint8_t ) 50
 
-#define MIN_TEMP_INDEX  20
-#define MAX_TEMP_INDEX  70
-#define DEFAULT_TEMP_INDEX  30
 
-#define TEMP_INDEX_PRESET_1 30
-#define TEMP_INDEX_PRESET_2 45
-#define TEMP_INDEX_PRESET_3 60
+#define MIN_RANGE (uint8_t ) 0
+#define MAX_RANGE (uint8_t ) 100
+
+#define MIN_TEMP_INDEX (uint8_t ) 15
+#define MAX_TEMP_INDEX (uint8_t ) 70
+#define DEFAULT_TEMP_INDEX (uint8_t ) 50
+
+#define TEMP_INDEX_PRESET_1 (uint8_t ) 20
+#define TEMP_INDEX_PRESET_2 (uint8_t ) 50
+#define TEMP_INDEX_PRESET_3  (uint8_t ) 80
 
 #define ANIMATION_PERIOD 20000
 #define STORAGE_WRITE_PERIOD 1000000
