@@ -363,7 +363,12 @@ static inline void esptimer_setup(esp_timer_handle_t *timer_handle, esp_timer_cb
 }
 
 static inline void nvs_storage_setup(){
-  ESP_ERROR_CHECK(nvs_flash_init());
+  esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+  ESP_ERROR_CHECK(ret);
   ESP_ERROR_CHECK(nvs_open("LED STORAGE", NVS_READWRITE, &storage_nvs_handle));
 }
 
@@ -416,3 +421,4 @@ static inline void colorTempIndex_to_RGB(uint8_t color_temp_index, rgb_t *rgb){
 static inline int range_map(int x, int in_min, int in_max, int out_min, int out_max) {
   return (int)((x - in_min) * (out_max - out_min) / (float)(in_max - in_min) + out_min);
 }
+
