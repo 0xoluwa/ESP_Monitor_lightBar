@@ -11,6 +11,7 @@
 #include "esp_timer.h"
 #include "driver/gpio.h"
 
+const char * DEBUG_TAG = "debug_led";
 
 TaskHandle_t led_task_handle = NULL;
 
@@ -27,7 +28,7 @@ static void espnow_init(void);
 static void recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_t *data, int data_len);
 
 const char * temp_index_key = "temp_index";
-const char * brightness_index_key = "brightness_index";
+const char * brightness_index_key = "bright_index";
 
 void led_animation_callback(void * args);
 void storage_write_callback(void * args);
@@ -165,6 +166,7 @@ void led_task(void *pvParameters) {
     xQueueReceive(led_queue, &led_message, portMAX_DELAY);
     switch (led_message.event_sig) {
     case POWER_SIG:{
+      ESP_LOGI(DEBUG_TAG, "entered power state");
       esp_err_t stop_ret = esp_timer_stop(storage_write_timer);
       if (stop_ret != ESP_OK && stop_ret != ESP_ERR_INVALID_STATE) ESP_ERROR_CHECK(stop_ret);
 
@@ -189,7 +191,7 @@ void led_task(void *pvParameters) {
     case KNOB_SIG:{
       if (power_state_ == OFF) break;
       
-      target_brightness_index = clip_range((target_brightness_index + led_message.brightness_index), MIN_BRIGHTNESS_INDEX, MAX_BRIGHTNESS_INDEX);
+      target_brightness_index = clip_range((target_brightness_index + (led_message.brightness_index * BRIGHTNESS_MULTIPLIER)), MIN_BRIGHTNESS_INDEX, MAX_BRIGHTNESS_INDEX);
       target_color_temp_index = clip_range((target_color_temp_index + led_message.color_temp_index), MIN_TEMP_INDEX, MAX_TEMP_INDEX);
 
       if ((current_brightness_index != target_brightness_index) || (current_color_temp_index != target_color_temp_index)){
@@ -199,6 +201,8 @@ void led_task(void *pvParameters) {
         if (stop_ret != ESP_OK && stop_ret != ESP_ERR_INVALID_STATE) ESP_ERROR_CHECK(stop_ret);
         ESP_ERROR_CHECK(esp_timer_start_once(storage_write_timer, STORAGE_WRITE_PERIOD));
       }
+
+      ESP_LOGI(DEBUG_TAG, "entered knob state with T_TEMP = %d, and T_COLOR = %d", target_color_temp_index, target_brightness_index);
       break;
     }
 
@@ -214,6 +218,8 @@ void led_task(void *pvParameters) {
         if (stop_ret != ESP_OK && stop_ret != ESP_ERR_INVALID_STATE) ESP_ERROR_CHECK(stop_ret);
         ESP_ERROR_CHECK(esp_timer_start_once(storage_write_timer, STORAGE_WRITE_PERIOD));
       }
+
+      ESP_LOGI(DEBUG_TAG, "entered color temp preset state with T_TEMP = %d", target_color_temp_index);
 
       break;
     }
@@ -257,6 +263,7 @@ void led_task(void *pvParameters) {
       ESP_ERROR_CHECK(nvs_set_u8(storage_handle, temp_index_key, target_color_temp_index));
       ESP_ERROR_CHECK(nvs_set_u8(storage_handle, brightness_index_key, target_brightness_index));
       ESP_ERROR_CHECK(nvs_commit(storage_handle));
+      ESP_LOGI(DEBUG_TAG, "entered storage state");
       break;
     }
     default:
