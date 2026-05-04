@@ -12,49 +12,37 @@
 #include "driver/gpio.h"
 
 const char * DEBUG_TAG = "debug_led";
+const char * nvs_temp_index_key = "temp_index";
+const char * nvs_brightness_index_key = "bright_index";
 
 TaskHandle_t led_task_handle = NULL;
-
-QueueHandle_t led_queue;
+QueueHandle_t led_message_queue = NULL;
 
 esp_timer_handle_t led_anim_timer;
 esp_timer_handle_t storage_write_timer;
 
-nvs_handle_t storage_handle;
+nvs_handle_t storage_nvs_handle;
 
 static void gpio_setup(void);
+static void espnow_setup(void);
+static inline void esptimer_setup(esp_timer_handle_t *timer_handle, esp_timer_cb_t user_callback, const char * timer_name);
+static inline void nvs_storage_setup();
+static inline void led_strip_setup(led_strip_handle_t *led_strip);
 
-static void espnow_init(void);
-static void recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_t *data, int data_len);
+/*CALLBACKS and ISR Handlers*/
+static void espnow_recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_t *data, int data_len);
+static void led_animation_callback(void * args);
+static void storage_write_callback(void * args);
 
-const char * temp_index_key = "temp_index";
-const char * brightness_index_key = "bright_index";
+/*Helper Functions*/
+static int clamp_value(int num, int min, int max);
+static rgb_t cct_apply_brightness(rgb_t cct_rgb, uint8_t brightness);
+static inline void restart_time_event(esp_timer_handle_t timer_handle, uint64_t timeout_us);
+static inline void colorTempIndex_to_RGB(uint8_t color_temp_index, rgb_t *rgb);
+static inline int range_map(int x, int in_min, int in_max, int out_min, int out_max);
 
-void led_animation_callback(void * args);
-void storage_write_callback(void * args);
 
-static inline void timeout_init(esp_timer_handle_t *timer_handle, esp_timer_cb_t user_callback, const char * timer_name){
-  esp_timer_create_args_t timer_cfg = {
-    .callback = user_callback,
-    .arg = NULL,
-    .dispatch_method = ESP_TIMER_TASK,
-    .name = timer_name,
-    .skip_unhandled_events = true
-  };
-
-  ESP_ERROR_CHECK(esp_timer_create(&timer_cfg, timer_handle));
-}
-
-static inline void storage_init(){
-  ESP_ERROR_CHECK(nvs_flash_init());
-  ESP_ERROR_CHECK(nvs_open("LED STORAGE", NVS_READWRITE, &storage_handle));
-}
-
-static int clip_range(int num, int min, int max){
-  if (num < min) return min;
-  else if (num > max) return max;
-  else return num;
-}
+void led_task(void *pvParameters);
 
 /**
  * @brief Packet type discriminator carried in every ::app_pkt_t frame.
@@ -101,15 +89,22 @@ typedef enum {
   MAX_POWER_STATE
 } power_state;
 
-rgb_t cct_apply_brightness(rgb_t cct_rgb, uint8_t brightness) {
-    return (rgb_t){
-        .red = (uint8_t)((cct_rgb.red * brightness + 127) / 255),
-        .green = (uint8_t)((cct_rgb.green * brightness + 127) / 255),
-        .blue = (uint8_t)((cct_rgb.blue * brightness + 127) / 255),
-    };
-}
+void app_main(void) {
+  nvs_storage_setup();
+  led_message_queue = xQueueCreate(20, sizeof(led_message_t));
+  configASSERT(led_message_queue != NULL);
+  espnow_setup();
+  gpio_setup();
 
-void led_task(void *pvParameters);
+  xTaskCreate(
+    &led_task,
+    "led task",
+    8192,
+    NULL,
+    2,
+    &led_task_handle
+  );
+}
 
 void led_task(void *pvParameters) {
   uint8_t current_brightness_index = 0;
@@ -118,169 +113,173 @@ void led_task(void *pvParameters) {
   uint8_t target_color_temp_index = 0;
   power_state power_state_ = OFF;
   rgb_t base_color;
-  base_color.red = color_temp_lookup[current_color_temp_index][0];
-  base_color.green = color_temp_lookup[current_color_temp_index][1];
-  base_color.blue = color_temp_lookup[current_color_temp_index][2];
 
   led_message_t led_message = {0};
   led_strip_handle_t led_strip = NULL;
 
-  led_strip_config_t strip_config = {
-      .strip_gpio_num = LED_STRIP_PIN,
-      .max_leds = LED_STRIP_COUNT,
-      .led_model = LED_MODEL_WS2812,
-      .color_component_format = LED_STRIP_COLOR_COMPONENT_FMT_GRB,
-      .flags = {
-          .invert_out = false, // don't invert the output signal
-      }};
-
-  // LED strip backend configuration: SPI
-  led_strip_spi_config_t spi_config = {.clk_src = SPI_CLK_SRC_DEFAULT,
-                                       .spi_bus = SPI2_HOST,
-                                       .flags = {
-                                           .with_dma = true,
-                                       }};
-  ESP_ERROR_CHECK(led_strip_new_spi_device(&strip_config, &spi_config, &led_strip));
-
-  timeout_init(&led_anim_timer, led_animation_callback, "ANIMATION TIMER");
-  timeout_init(&storage_write_timer, storage_write_callback, "STORAGE WRITE");
+  led_strip_setup(&led_strip);
+  esptimer_setup(&led_anim_timer, led_animation_callback, "ANIMATION TIMER");
+  esptimer_setup(&storage_write_timer, storage_write_callback, "STORAGE WRITE");
 
   esp_err_t ret;
-  ret = nvs_get_u8(storage_handle, temp_index_key, &target_color_temp_index);
+  ret = nvs_get_u8(storage_nvs_handle, nvs_temp_index_key, &target_color_temp_index);
   if (ret == ESP_ERR_NVS_NOT_FOUND) {
     target_color_temp_index = DEFAULT_TEMP_INDEX;
-    ESP_ERROR_CHECK(nvs_set_u8(storage_handle, temp_index_key, DEFAULT_TEMP_INDEX));
-    ESP_ERROR_CHECK(nvs_commit(storage_handle));
+    ESP_ERROR_CHECK(nvs_set_u8(storage_nvs_handle, nvs_temp_index_key, DEFAULT_TEMP_INDEX));
+    ESP_ERROR_CHECK(nvs_commit(storage_nvs_handle));
   }
   else ESP_ERROR_CHECK(ret);
+  
+  /* Validate loaded temp index is within valid range */
+  if (target_color_temp_index < MIN_TEMP_INDEX || target_color_temp_index > MAX_TEMP_INDEX) {
+    ESP_LOGW(DEBUG_TAG, "Loaded invalid temp index %d, resetting to default", target_color_temp_index);
+    target_color_temp_index = DEFAULT_TEMP_INDEX;
+    ESP_ERROR_CHECK(nvs_set_u8(storage_nvs_handle, nvs_temp_index_key, DEFAULT_TEMP_INDEX));
+    ESP_ERROR_CHECK(nvs_commit(storage_nvs_handle));
+  }
 
-  ret = nvs_get_u8(storage_handle, brightness_index_key, &target_brightness_index);
+  ret = nvs_get_u8(storage_nvs_handle, nvs_brightness_index_key, &target_brightness_index);
   if (ret == ESP_ERR_NVS_NOT_FOUND){
     target_brightness_index = DEFAULT_BRIGHTNESS_INDEX;
-    ESP_ERROR_CHECK(nvs_set_u8(storage_handle, brightness_index_key, DEFAULT_BRIGHTNESS_INDEX));
-    ESP_ERROR_CHECK(nvs_commit(storage_handle));
+    ESP_ERROR_CHECK(nvs_set_u8(storage_nvs_handle, nvs_brightness_index_key, DEFAULT_BRIGHTNESS_INDEX));
+    ESP_ERROR_CHECK(nvs_commit(storage_nvs_handle));
   }
   else ESP_ERROR_CHECK(ret);
+  
+  /* Validate loaded brightness index is within valid range */
+  if (target_brightness_index < MIN_BRIGHTNESS_INDEX || target_brightness_index > MAX_BRIGHTNESS_INDEX) {
+    ESP_LOGW(DEBUG_TAG, "Loaded invalid brightness index %d, resetting to default", target_brightness_index);
+    target_brightness_index = DEFAULT_BRIGHTNESS_INDEX;
+    ESP_ERROR_CHECK(nvs_set_u8(storage_nvs_handle, nvs_brightness_index_key, DEFAULT_BRIGHTNESS_INDEX));
+    ESP_ERROR_CHECK(nvs_commit(storage_nvs_handle));
+  }
+
+  configASSERT(target_color_temp_index <= MAX_RANGE);
+  configASSERT(target_brightness_index <= MAX_RANGE);
+
+  colorTempIndex_to_RGB(target_color_temp_index, &base_color);
 
   while (1) {
-    xQueueReceive(led_queue, &led_message, portMAX_DELAY);
+    xQueueReceive(led_message_queue, &led_message, portMAX_DELAY);
     switch (led_message.event_sig) {
-    case POWER_SIG:{
-      ESP_LOGI(DEBUG_TAG, "entered power state");
-      esp_err_t stop_ret = esp_timer_stop(storage_write_timer);
-      if (stop_ret != ESP_OK && stop_ret != ESP_ERR_INVALID_STATE) ESP_ERROR_CHECK(stop_ret);
+      case POWER_SIG:{
+        ESP_LOGI(DEBUG_TAG, "entered power state");
 
-      if (power_state_ == ON){
-        target_brightness_index = 0;
-
-        power_state_ = OFF;
-      }else{
-        power_state_ = ON;
-
-        ESP_ERROR_CHECK(nvs_get_u8(storage_handle, temp_index_key, &target_color_temp_index));
-        ESP_ERROR_CHECK(nvs_get_u8(storage_handle, brightness_index_key, &target_brightness_index));
-      }
-
-      if ((current_brightness_index != target_brightness_index) || (current_color_temp_index != target_color_temp_index)){
-        xQueueSend(led_queue, &((led_message_t) {.event_sig = ANIM_TICK_SIG}), 0);
-      }
-
-      break;
-    }
-
-    case KNOB_SIG:{
-      if (power_state_ == OFF) break;
-      
-      target_brightness_index = clip_range((target_brightness_index + (led_message.brightness_index * BRIGHTNESS_MULTIPLIER)), MIN_BRIGHTNESS_INDEX, MAX_BRIGHTNESS_INDEX);
-      target_color_temp_index = clip_range((target_color_temp_index + led_message.color_temp_index), MIN_TEMP_INDEX, MAX_TEMP_INDEX);
-
-      if ((current_brightness_index != target_brightness_index) || (current_color_temp_index != target_color_temp_index)){
-        xQueueSend(led_queue, &((led_message_t) {.event_sig = ANIM_TICK_SIG}), 0);
-        
         esp_err_t stop_ret = esp_timer_stop(storage_write_timer);
         if (stop_ret != ESP_OK && stop_ret != ESP_ERR_INVALID_STATE) ESP_ERROR_CHECK(stop_ret);
-        ESP_ERROR_CHECK(esp_timer_start_once(storage_write_timer, STORAGE_WRITE_PERIOD));
-      }
 
-      ESP_LOGI(DEBUG_TAG, "entered knob state with T_TEMP = %d, and T_COLOR = %d", target_color_temp_index, target_brightness_index);
-      break;
-    }
+        if (power_state_ == ON) {
+          ESP_ERROR_CHECK(nvs_set_u8(storage_nvs_handle, nvs_brightness_index_key, target_brightness_index));
+          ESP_ERROR_CHECK(nvs_set_u8(storage_nvs_handle, nvs_temp_index_key, target_color_temp_index));
+          ESP_ERROR_CHECK(nvs_commit(storage_nvs_handle));
 
-    case COLOR_TEMP_SIG:{
-      if (power_state_ == OFF) break;
-      if ((target_color_temp_index < TEMP_INDEX_PRESET_1) || (target_color_temp_index >= TEMP_INDEX_PRESET_3)) target_color_temp_index = TEMP_INDEX_PRESET_1;
-      else if ((target_color_temp_index >= TEMP_INDEX_PRESET_1) && (target_color_temp_index < TEMP_INDEX_PRESET_2)) target_color_temp_index = TEMP_INDEX_PRESET_2;
-      else if ((target_color_temp_index >= TEMP_INDEX_PRESET_2) && (target_color_temp_index < TEMP_INDEX_PRESET_3)) target_color_temp_index = TEMP_INDEX_PRESET_3;
+          target_brightness_index = 0;
+          power_state_ = OFF;
+          //also turn of the led power to stop it from consuming any power
+        } else{
+            power_state_ = ON;
 
-      if ((current_brightness_index != target_brightness_index) || (current_color_temp_index != target_color_temp_index)){
-        xQueueSend(led_queue, &((led_message_t) {.event_sig = ANIM_TICK_SIG}), 0);
-        esp_err_t stop_ret = esp_timer_stop(storage_write_timer);
-        if (stop_ret != ESP_OK && stop_ret != ESP_ERR_INVALID_STATE) ESP_ERROR_CHECK(stop_ret);
-        ESP_ERROR_CHECK(esp_timer_start_once(storage_write_timer, STORAGE_WRITE_PERIOD));
-      }
-
-      ESP_LOGI(DEBUG_TAG, "entered color temp preset state with T_TEMP = %d", target_color_temp_index);
-
-      break;
-    }
-
-    case ANIM_TICK_SIG:{
-      bool refresh = false;
-      
-      if (current_color_temp_index != target_color_temp_index){
-        if (current_color_temp_index < target_color_temp_index) current_color_temp_index++;
-        else if (current_color_temp_index > target_color_temp_index) current_color_temp_index--;
-
-        base_color.red = color_temp_lookup[current_color_temp_index][0];
-        base_color.green = color_temp_lookup[current_color_temp_index][1];
-        base_color.blue = color_temp_lookup[current_color_temp_index][2];
-
-        refresh = true;
-      }
-
-      if (current_brightness_index != target_brightness_index){
-        if (current_brightness_index < target_brightness_index) current_brightness_index++;
-        else if (current_brightness_index > target_brightness_index) current_brightness_index--;
-        refresh = true;
-      }
-
-      if (refresh){
-        rgb_t final_color = cct_apply_brightness(base_color, current_brightness_index);
-        for(int i = 0; i < LED_STRIP_COUNT; i++){ 
-          ESP_ERROR_CHECK(led_strip_set_pixel(led_strip, i, final_color.red, final_color.green, final_color.blue));
+            ESP_ERROR_CHECK(nvs_get_u8(storage_nvs_handle, nvs_temp_index_key, &target_color_temp_index));
+            ESP_ERROR_CHECK(nvs_get_u8(storage_nvs_handle, nvs_brightness_index_key, &target_brightness_index));
+            configASSERT(target_color_temp_index <= MAX_RANGE);
+            configASSERT(target_brightness_index <= MAX_RANGE);
+            //turn led power on  
         }
 
-        ESP_ERROR_CHECK(led_strip_refresh(led_strip));
-        esp_err_t stop_ret = esp_timer_stop(led_anim_timer);
-        if (stop_ret != ESP_OK && stop_ret != ESP_ERR_INVALID_STATE) ESP_ERROR_CHECK(stop_ret);
-        ESP_ERROR_CHECK(esp_timer_start_once(led_anim_timer, ANIMATION_PERIOD));
-      }
-      break;
-    }
+        if ((current_brightness_index != target_brightness_index) || (current_color_temp_index != target_color_temp_index)){
+          xQueueSend(led_message_queue, &((led_message_t) {.event_sig = ANIM_TICK_SIG}), 0);
+        }
 
-    case STORAGE_SIG:{
-      if (power_state_ == OFF) break;
-      ESP_ERROR_CHECK(nvs_set_u8(storage_handle, temp_index_key, target_color_temp_index));
-      ESP_ERROR_CHECK(nvs_set_u8(storage_handle, brightness_index_key, target_brightness_index));
-      ESP_ERROR_CHECK(nvs_commit(storage_handle));
-      ESP_LOGI(DEBUG_TAG, "entered storage state");
-      break;
-    }
-    default:
-      break;
+        break;
+      }
+
+      case KNOB_SIG:{
+        if (power_state_ == OFF) break;
+        
+        target_brightness_index = clamp_value((target_brightness_index + led_message.brightness_index), MIN_RANGE, MAX_RANGE);
+        target_color_temp_index = clamp_value((target_color_temp_index + led_message.color_temp_index), MIN_RANGE, MAX_RANGE);
+
+        if ((current_brightness_index != target_brightness_index) || (current_color_temp_index != target_color_temp_index)){
+          xQueueSend(led_message_queue, &((led_message_t) {.event_sig = ANIM_TICK_SIG}), 0);
+          
+          restart_time_event(storage_write_timer, STORAGE_WRITE_PERIOD);
+        }
+
+        ESP_LOGI(DEBUG_TAG, "entered knob state with T_TEMP = %d, and T_COLOR = %d", target_color_temp_index, target_brightness_index);
+        break;
+      }
+
+      case COLOR_TEMP_SIG:{
+        if (power_state_ == OFF) break;
+        if ((target_color_temp_index < TEMP_INDEX_PRESET_1) || (target_color_temp_index >= TEMP_INDEX_PRESET_3)) target_color_temp_index = TEMP_INDEX_PRESET_1;
+        else if ((target_color_temp_index >= TEMP_INDEX_PRESET_1) && (target_color_temp_index < TEMP_INDEX_PRESET_2)) target_color_temp_index = TEMP_INDEX_PRESET_2;
+        else if ((target_color_temp_index >= TEMP_INDEX_PRESET_2) && (target_color_temp_index < TEMP_INDEX_PRESET_3)) target_color_temp_index = TEMP_INDEX_PRESET_3;
+
+        if ((current_brightness_index != target_brightness_index) || (current_color_temp_index != target_color_temp_index)){
+          xQueueSend(led_message_queue, &((led_message_t) {.event_sig = ANIM_TICK_SIG}), 0);
+          restart_time_event(storage_write_timer, STORAGE_WRITE_PERIOD);
+        }
+
+        ESP_LOGI(DEBUG_TAG, "entered color temp preset state with T_TEMP = %d", target_color_temp_index);
+
+        break;
+      }
+
+      case ANIM_TICK_SIG:{
+        bool refresh = false;
+        
+        if (current_color_temp_index != target_color_temp_index){
+          if (current_color_temp_index < target_color_temp_index) current_color_temp_index++;
+          else if (current_color_temp_index > target_color_temp_index) current_color_temp_index--;
+
+          int mapped_temp_index = range_map(current_color_temp_index, MIN_RANGE, MAX_RANGE, MIN_TEMP_INDEX, MAX_TEMP_INDEX);
+          colorTempIndex_to_RGB(mapped_temp_index, &base_color);
+          refresh = true;
+        }
+
+        if (current_brightness_index != target_brightness_index){
+          if (current_brightness_index < target_brightness_index) current_brightness_index++;
+          else if (current_brightness_index > target_brightness_index) current_brightness_index--;
+          refresh = true;
+        }
+
+        if (refresh){
+          int mapped_brightness_index = range_map(current_brightness_index, MIN_RANGE, MAX_RANGE, MIN_BRIGHTNESS_INDEX, MAX_BRIGHTNESS_INDEX);
+          rgb_t final_color = cct_apply_brightness(base_color, mapped_brightness_index);
+          for(int i = 0; i < LED_STRIP_COUNT; i++){ 
+            ESP_ERROR_CHECK(led_strip_set_pixel(led_strip, i, final_color.red, final_color.green, final_color.blue));
+          }
+
+          ESP_ERROR_CHECK(led_strip_refresh(led_strip));
+          restart_time_event(led_anim_timer, ANIMATION_PERIOD);
+        }
+        break;
+      }
+
+      case STORAGE_SIG:{
+        if (power_state_ == OFF) break;
+        ESP_ERROR_CHECK(nvs_set_u8(storage_nvs_handle, nvs_temp_index_key, target_color_temp_index));
+        ESP_ERROR_CHECK(nvs_set_u8(storage_nvs_handle, nvs_brightness_index_key, target_brightness_index));
+        ESP_ERROR_CHECK(nvs_commit(storage_nvs_handle));
+        ESP_LOGI(DEBUG_TAG, "entered storage state");
+        break;
+      }
+
+      default:
+        break;
     }
   }
 }
 
 void led_animation_callback(void *args){
-  xQueueSend(led_queue, &((led_message_t) {.event_sig = ANIM_TICK_SIG}), 0);
+  xQueueSend(led_message_queue, &((led_message_t) {.event_sig = ANIM_TICK_SIG}), 0);
 }
 
 void storage_write_callback(void * args){
-  xQueueSend(led_queue, &((led_message_t) {.event_sig = STORAGE_SIG}), 0);
+  xQueueSend(led_message_queue, &((led_message_t) {.event_sig = STORAGE_SIG}), 0);
 }
 
-void espnow_init(void)
+void espnow_setup(void)
 {
     /* NVS flash init occurred in main before this call. */
     ESP_ERROR_CHECK(esp_netif_init());
@@ -294,10 +293,10 @@ void espnow_init(void)
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE)); /* disable power-save — ESP-NOW needs radio always-on */
 
     ESP_ERROR_CHECK(esp_now_init());
-    ESP_ERROR_CHECK(esp_now_register_recv_cb(recv_cb));
+    ESP_ERROR_CHECK(esp_now_register_recv_cb(espnow_recv_cb));
 }
 
-static void recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_t *data, int data_len)
+static void espnow_recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_t *data, int data_len)
 {
     if (data_len != sizeof(app_pkt_t)) return;
     const app_pkt_t *msg = (const app_pkt_t *)data;
@@ -306,18 +305,18 @@ static void recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_t *data
         case PKT_BRIGHTNESS_EVENT:
           message.brightness_index = msg->knob_delta;
           message.event_sig = KNOB_SIG;
-          xQueueSend(led_queue, &message, 0);
+          xQueueSend(led_message_queue, &message, 0);
           break;
 
         case PKT_COLOR_TEMP_EVENT:
           message.color_temp_index = msg->knob_delta;
           message.event_sig = KNOB_SIG;
-          xQueueSend(led_queue, &message, 0);
+          xQueueSend(led_message_queue, &message, 0);
           break;
 
         case PKT_KNOB_BUTTON:
           message.event_sig = POWER_SIG;
-          xQueueSend(led_queue, &message, 0);
+          xQueueSend(led_message_queue, &message, 0);
           break;
 
         default:
@@ -327,24 +326,29 @@ static void recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_t *data
 
 static void IRAM_ATTR power_btn_isr(void *arg)
 {
+    BaseType_t isTaskWoken = pdFALSE;
     static int64_t last_trigger_us = 0;
     int64_t now = esp_timer_get_time();
 
     if ((now - last_trigger_us) < BUTTON_DEBOUNCE_US) return;   // 50 ms guard
     last_trigger_us = now;
 
-    xQueueSendFromISR(led_queue, &((led_message_t){.event_sig = POWER_SIG}), NULL);
+    xQueueSendFromISR(led_message_queue, &((led_message_t){.event_sig = POWER_SIG}), &isTaskWoken);
+
+    if (isTaskWoken) portYIELD_FROM_ISR();
 }
 
 static void IRAM_ATTR preset_btn_isr(void *arg)
 {
+    BaseType_t isTaskWoken = pdFALSE;
     static int64_t last_trigger_us_preset = 0;
     int64_t now = esp_timer_get_time();
 
     if ((now - last_trigger_us_preset) < BUTTON_DEBOUNCE_US) return;   // 50 ms guard
     last_trigger_us_preset = now;
 
-    xQueueSendFromISR(led_queue, &((led_message_t){.event_sig = COLOR_TEMP_SIG}), NULL);
+    xQueueSendFromISR(led_message_queue, &((led_message_t){.event_sig = COLOR_TEMP_SIG}), &isTaskWoken);
+    if (isTaskWoken) portYIELD_FROM_ISR();
 }
 
 static void gpio_setup(void)
@@ -362,19 +366,69 @@ static void gpio_setup(void)
     ESP_ERROR_CHECK(gpio_isr_handler_add(PRESET_TEMP_PIN,  preset_btn_isr, NULL));
 }
 
-void app_main(void) {
-  storage_init();
-  led_queue = xQueueCreate(20, sizeof(led_message_t));
-  configASSERT(led_queue != NULL);
-  espnow_init();
-  gpio_setup();
+static inline void esptimer_setup(esp_timer_handle_t *timer_handle, esp_timer_cb_t user_callback, const char * timer_name){
+  esp_timer_create_args_t timer_cfg = {
+    .callback = user_callback,
+    .arg = NULL,
+    .dispatch_method = ESP_TIMER_TASK,
+    .name = timer_name,
+    .skip_unhandled_events = true
+  };
 
-  xTaskCreate(
-    &led_task,
-    "led task",
-    8192,
-    NULL,
-    2,
-    &led_task_handle
-  );
+  ESP_ERROR_CHECK(esp_timer_create(&timer_cfg, timer_handle));
+}
+
+static inline void nvs_storage_setup(){
+  ESP_ERROR_CHECK(nvs_flash_init());
+  ESP_ERROR_CHECK(nvs_open("LED STORAGE", NVS_READWRITE, &storage_nvs_handle));
+}
+
+static int clamp_value(int num, int min, int max){
+  if (num < min) return min;
+  else if (num > max) return max;
+  else return num;
+}
+
+static rgb_t cct_apply_brightness(rgb_t cct_rgb, uint8_t brightness) {
+    float scale = brightness / 255.0f;
+    return (rgb_t){
+        .red   = gamma_lut[(uint8_t)(cct_rgb.red   * scale + 0.5f)],
+        .green = gamma_lut[(uint8_t)(cct_rgb.green * scale + 0.5f)],
+        .blue  = gamma_lut[(uint8_t)(cct_rgb.blue  * scale + 0.5f)],
+    };
+}
+
+static inline void restart_time_event(esp_timer_handle_t timer_handle, uint64_t timeout_us){
+  esp_err_t stop_ret = esp_timer_stop(timer_handle);
+  if (stop_ret != ESP_OK && stop_ret != ESP_ERR_INVALID_STATE) ESP_ERROR_CHECK(stop_ret);
+  ESP_ERROR_CHECK(esp_timer_start_once(timer_handle, timeout_us));
+}
+
+static inline void led_strip_setup(led_strip_handle_t *led_strip){
+  led_strip_config_t strip_config = {
+      .strip_gpio_num = LED_STRIP_PIN,
+      .max_leds = LED_STRIP_COUNT,
+      .led_model = LED_MODEL_WS2812,
+      .color_component_format = LED_STRIP_COLOR_COMPONENT_FMT_GRB,
+      .flags = {
+          .invert_out = false, // don't invert the output signal
+      }};
+
+  // LED strip backend configuration: SPI
+  led_strip_spi_config_t spi_config = {.clk_src = SPI_CLK_SRC_DEFAULT,
+                                       .spi_bus = SPI2_HOST,
+                                       .flags = {
+                                           .with_dma = true,
+                                       }};
+  ESP_ERROR_CHECK(led_strip_new_spi_device(&strip_config, &spi_config, led_strip));
+}
+
+static inline void colorTempIndex_to_RGB(uint8_t color_temp_index, rgb_t *rgb){
+  rgb->red = color_temp_lookup[color_temp_index][0];
+  rgb->green = color_temp_lookup[color_temp_index][1];
+  rgb->blue = color_temp_lookup[color_temp_index][2];
+}
+
+static inline int range_map(int x, int in_min, int in_max, int out_min, int out_max) {
+  return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
 }
