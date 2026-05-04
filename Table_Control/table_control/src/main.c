@@ -30,14 +30,6 @@ typedef struct __attribute__((packed)){
 } app_pkt_t;
 static void send_packet(app_pkt_t * const pkt);
 
-static const uint8_t LIGHTBAR_MAC[ESP_NOW_ETH_ALEN] = {0xB4, 0xBF, 0xE9, 0x15, 0xA6, 0xD4};
-
-static uint8_t s_seq = 0;
-
-static QueueHandle_t s_send_queue;
-
-static void espnow_init();
-
 typedef enum{
     BRIGHT,
     TEMP
@@ -59,23 +51,32 @@ typedef struct{
 } knob_message_t;
 
 
-static TaskHandle_t controller_handle;
-static void controller_task(void *param);
+static uint8_t volatile s_seq = 0;
+static QueueHandle_t espnow_send_handle_q = NULL;
 static QueueHandle_t controller_queue = NULL;
+
+static TaskHandle_t controller_handle;
 
 esp_timer_handle_t knob_timer_handle;
 esp_timer_handle_t sleep_timer_handle;
 esp_timer_handle_t long_press_handle;
-static void post_timeout_init(esp_timer_handle_t *timer_handle, esp_timer_cb_t call_back, const char * timer_name);
+
+/*CALLBACKS and ISR functions*/
 static void knob_callback(void * args);
 static void sleep_mode_callback(void * args);
-static void restart_time_event(esp_timer_handle_t *timer_handle, uint64_t period);
-static inline void encoder_handle_tick(void);
-
-static void knob_button_setup(void);
 static void knob_button_isr(void *arg);
+
+// Setup functions
+static void espnow_setup();
+static void knob_button_setup(void);
 static void post_long_press_event(void * args);
 static void encoder_pins_setup(void);
+static void timeout_setup(esp_timer_handle_t *timer_handle, esp_timer_cb_t call_back, const char * timer_name);
+
+
+static void restart_time_event(esp_timer_handle_t *timer_handle, uint64_t period);
+static inline void encoder_handle_tick(void);
+static void controller_task(void *param);
 
 void app_main(void){
     esp_err_t ret = nvs_flash_init();
@@ -87,6 +88,7 @@ void app_main(void){
 
     controller_queue = xQueueCreate(20, sizeof(knob_message_t));
     configASSERT(controller_queue != NULL);
+
     encoder_pins_setup();
     knob_button_setup();
 
@@ -97,14 +99,15 @@ static void controller_task(void *param){
     knob_state_t knob_state = BRIGHT;
     knob_message_t message = {0};
 
-    espnow_init();
-    post_timeout_init(&knob_timer_handle, knob_callback, "Knob timer");
+    espnow_setup();
+
+    timeout_setup(&knob_timer_handle, knob_callback, "Knob timer");
     ESP_ERROR_CHECK(esp_timer_start_periodic(knob_timer_handle, KNOB_POLL_PERIOD_US));
 
-    post_timeout_init(&sleep_timer_handle, sleep_mode_callback, "sleep timer");
+    timeout_setup(&sleep_timer_handle, sleep_mode_callback, "sleep timer");
     ESP_ERROR_CHECK(esp_timer_start_once(sleep_timer_handle, SLEEP_PERIOD_US));
 
-    post_timeout_init(&long_press_handle, post_long_press_event, "long press");
+    timeout_setup(&long_press_handle, post_long_press_event, "long press");
 
     for (;;){
         xQueueReceive(controller_queue, &message, portMAX_DELAY);
@@ -178,7 +181,7 @@ static void post_long_press_event(void * args){
     xQueueSend(controller_queue, &message, 0);
 }
 
-static void post_timeout_init(esp_timer_handle_t *timer_handle, esp_timer_cb_t call_back, const char * timer_name){
+static void timeout_setup(esp_timer_handle_t *timer_handle, esp_timer_cb_t call_back, const char * timer_name){
     esp_timer_create_args_t timer_cfg = {
         .callback = call_back,
         .arg = NULL,
@@ -220,7 +223,7 @@ static const int8_t knob_lookup[4][4] = {
 /* S3 */  {99,   0,   0,   0 },
 };
 
-static enc_state_t previous_state;
+static volatile enc_state_t previous_state;
 
 static inline void encoder_handle_tick(void) {
     static int16_t knob_delta_ = 0;
@@ -231,12 +234,10 @@ static inline void encoder_handle_tick(void) {
     enc_state_t next_state = (enc_state_t)((a << 1) | b);
     int8_t step = knob_lookup[previous_state][next_state];
 
-    if (step == 99) {
-        return;
+    if (step != 99) {
+        knob_delta_ += step;
     }
-
-    knob_delta_ += step;
-    previous_state  = next_state;
+    previous_state = next_state;
 
     static uint64_t last_flush_us = 0;
     uint64_t now_us = esp_timer_get_time();
@@ -327,7 +328,7 @@ static void send_cb(const uint8_t *mac, esp_now_send_status_t status) {
 static void sender_task(void *pv){
     app_pkt_t pkt;
     for (;;) {
-        xQueueReceive(s_send_queue, &pkt, portMAX_DELAY);
+        xQueueReceive(espnow_send_handle_q, &pkt, portMAX_DELAY);
         esp_err_t err = esp_now_send(LIGHTBAR_MAC, (const uint8_t *)&pkt, sizeof(pkt));
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "seq=%u send failed: %s", pkt.seq, esp_err_to_name(err));
@@ -335,7 +336,7 @@ static void sender_task(void *pv){
     }
 }
 
-static void espnow_init(){
+static void espnow_setup(){
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
@@ -357,14 +358,14 @@ static void espnow_init(){
     memcpy(peer.peer_addr, LIGHTBAR_MAC, ESP_NOW_ETH_ALEN);
     ESP_ERROR_CHECK(esp_now_add_peer(&peer));
 
-    s_send_queue = xQueueCreate(8, sizeof(app_pkt_t));
-    configASSERT(s_send_queue);
+    espnow_send_handle_q = xQueueCreate(8, sizeof(app_pkt_t));
+    configASSERT(espnow_send_handle_q);
     configASSERT(xTaskCreate(sender_task, "espnow_sender", 8192, NULL, 1, NULL));
 }
 
 static void send_packet(app_pkt_t * const pkt){
     pkt->seq = s_seq++;
-    if (xQueueSend(s_send_queue, pkt, 0) != pdTRUE) {
+    if (xQueueSend(espnow_send_handle_q, pkt, 0) != pdTRUE) {
         ESP_LOGW(TAG, "seq=%u send queue full, dropped", pkt->seq);
     }
 }

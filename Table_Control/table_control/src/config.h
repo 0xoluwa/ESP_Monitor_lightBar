@@ -17,5 +17,7 @@
 
 #define ESPNOW_CHANNEL 1
 
+static const uint8_t LIGHTBAR_MAC[ESP_NOW_ETH_ALEN] = {0xB4, 0xBF, 0xE9, 0x15, 0xA6, 0xD4};
+
 
 #endif
