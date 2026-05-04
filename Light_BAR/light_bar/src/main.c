@@ -129,14 +129,6 @@ void led_task(void *pvParameters) {
     ESP_ERROR_CHECK(nvs_commit(storage_nvs_handle));
   }
   else ESP_ERROR_CHECK(ret);
-  
-  /* Validate loaded temp index is within valid range */
-  if (target_color_temp_index < MIN_TEMP_INDEX || target_color_temp_index > MAX_TEMP_INDEX) {
-    ESP_LOGW(DEBUG_TAG, "Loaded invalid temp index %d, resetting to default", target_color_temp_index);
-    target_color_temp_index = DEFAULT_TEMP_INDEX;
-    ESP_ERROR_CHECK(nvs_set_u8(storage_nvs_handle, nvs_temp_index_key, DEFAULT_TEMP_INDEX));
-    ESP_ERROR_CHECK(nvs_commit(storage_nvs_handle));
-  }
 
   ret = nvs_get_u8(storage_nvs_handle, nvs_brightness_index_key, &target_brightness_index);
   if (ret == ESP_ERR_NVS_NOT_FOUND){
@@ -145,14 +137,6 @@ void led_task(void *pvParameters) {
     ESP_ERROR_CHECK(nvs_commit(storage_nvs_handle));
   }
   else ESP_ERROR_CHECK(ret);
-  
-  /* Validate loaded brightness index is within valid range */
-  if (target_brightness_index < MIN_BRIGHTNESS_INDEX || target_brightness_index > MAX_BRIGHTNESS_INDEX) {
-    ESP_LOGW(DEBUG_TAG, "Loaded invalid brightness index %d, resetting to default", target_brightness_index);
-    target_brightness_index = DEFAULT_BRIGHTNESS_INDEX;
-    ESP_ERROR_CHECK(nvs_set_u8(storage_nvs_handle, nvs_brightness_index_key, DEFAULT_BRIGHTNESS_INDEX));
-    ESP_ERROR_CHECK(nvs_commit(storage_nvs_handle));
-  }
 
   configASSERT(target_color_temp_index <= MAX_RANGE);
   configASSERT(target_brightness_index <= MAX_RANGE);
@@ -430,5 +414,5 @@ static inline void colorTempIndex_to_RGB(uint8_t color_temp_index, rgb_t *rgb){
 }
 
 static inline int range_map(int x, int in_min, int in_max, int out_min, int out_max) {
-  return (x - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
+  return (int)((x - in_min) * (out_max - out_min) / (float)(in_max - in_min) + out_min);
 }
