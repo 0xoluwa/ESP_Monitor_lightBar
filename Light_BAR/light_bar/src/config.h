@@ -19,7 +19,7 @@
 #define LED_STRIP_POWER_PIN 21
 
 
-#define MIN_BRIGHTNESS_INDEX   (uint8_t ) 20
+#define MIN_BRIGHTNESS_INDEX   (uint8_t ) 50
 #define MAX_BRIGHTNESS_INDEX   (uint8_t ) 255
 #define DEFAULT_BRIGHTNESS_INDEX    (uint8_t ) 50
 
