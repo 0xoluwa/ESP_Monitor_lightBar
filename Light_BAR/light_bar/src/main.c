@@ -15,13 +15,13 @@ const char * DEBUG_TAG = "debug_led";
 const char * nvs_temp_index_key = "temp_index";
 const char * nvs_brightness_index_key = "bright_index";
 
-TaskHandle_t led_task_handle = NULL;
-QueueHandle_t led_message_queue = NULL;
+static TaskHandle_t led_task_handle = NULL;
+static QueueHandle_t led_message_queue = NULL;
 
-esp_timer_handle_t led_anim_timer;
-esp_timer_handle_t storage_write_timer;
+static esp_timer_handle_t led_anim_timer;
+static esp_timer_handle_t storage_write_timer;
 
-nvs_handle_t storage_nvs_handle;
+static nvs_handle_t storage_nvs_handle;
 
 static void gpio_setup(void);
 static void espnow_setup(void);
@@ -61,14 +61,14 @@ typedef enum __attribute__((packed)) {
  * Packed to ensure the sender and receiver agree on the exact byte layout
  * regardless of compiler padding rules.
  */
-typedef struct __attribute__((packed)) {
+struct __attribute__((packed)) app_pkt_t {
     pkt_type_t type; /**< Identifies the event carried by this packet. */
     uint8_t    seq;  /**< Sequence number (reserved for future deduplication). */
     union {
         int16_t knob_delta;        /**< Signed encoder step — valid for PKT_BRIGHTNESS_EVENT and PKT_COLOR_TEMP_EVENT. */
         uint8_t knob_button_state; /**< Button state — valid for PKT_KNOB_BUTTON. */
     };
-} app_pkt_t;
+};
 
 typedef enum {
   ANIM_TICK_SIG,
@@ -79,11 +79,11 @@ typedef enum {
   MAX_SIG
 } signal;
 
-typedef struct {
+struct led_message_t {
   signal event_sig;
   int brightness_index;
   int color_temp_index;
-} led_message_t;
+};
 
 typedef enum {
   ON,
@@ -93,7 +93,7 @@ typedef enum {
 
 void app_main(void) {
   nvs_storage_setup();
-  led_message_queue = xQueueCreate(20, sizeof(led_message_t));
+  led_message_queue = xQueueCreate(20, sizeof(struct led_message_t));
   configASSERT(led_message_queue != NULL);
   espnow_setup();
   gpio_setup();
@@ -116,7 +116,7 @@ void led_task(void *pvParameters) {
   power_state power_state_ = OFF;
   rgb_t base_color;
 
-  led_message_t led_message = {0};
+  struct led_message_t led_message = {0};
   led_strip_handle_t led_strip = NULL;
 
   led_strip_setup(&led_strip);
@@ -140,8 +140,10 @@ void led_task(void *pvParameters) {
   }
   else ESP_ERROR_CHECK(ret);
 
-  configASSERT(target_color_temp_index <= MAX_RANGE);
-  configASSERT(target_brightness_index <= MAX_RANGE);
+  target_color_temp_index = clamp_value(target_color_temp_index, MIN_RANGE, MAX_RANGE);
+  target_brightness_index = clamp_value(target_brightness_index, MIN_RANGE, MAX_RANGE);
+  //configASSERT(target_color_temp_index <= MAX_RANGE);
+  //configASSERT(target_brightness_index <= MAX_RANGE);
 
   colorTempIndex_to_RGB(target_color_temp_index, &base_color);
   turn_led_strip_off();
@@ -168,13 +170,15 @@ void led_task(void *pvParameters) {
 
             ESP_ERROR_CHECK(nvs_get_u8(storage_nvs_handle, nvs_temp_index_key, &target_color_temp_index));
             ESP_ERROR_CHECK(nvs_get_u8(storage_nvs_handle, nvs_brightness_index_key, &target_brightness_index));
-            configASSERT(target_color_temp_index <= MAX_RANGE);
-            configASSERT(target_brightness_index <= MAX_RANGE);
+            target_color_temp_index = clamp_value(target_color_temp_index, MIN_RANGE, MAX_RANGE);
+            target_brightness_index = clamp_value(target_brightness_index, MIN_RANGE, MAX_RANGE);
+            //configASSERT(target_color_temp_index <= MAX_RANGE);
+            //configASSERT(target_brightness_index <= MAX_RANGE);
             turn_led_strip_on(); 
         }
 
         if ((current_brightness_index != target_brightness_index) || (current_color_temp_index != target_color_temp_index)){
-          xQueueSend(led_message_queue, &((led_message_t) {.event_sig = ANIM_TICK_SIG}), 0);
+          xQueueSend(led_message_queue, &((struct led_message_t) {.event_sig = ANIM_TICK_SIG}), 0);
         }
 
         break;
@@ -187,7 +191,7 @@ void led_task(void *pvParameters) {
         target_color_temp_index = clamp_value((target_color_temp_index + led_message.color_temp_index), MIN_RANGE, MAX_RANGE);
 
         if ((current_brightness_index != target_brightness_index) || (current_color_temp_index != target_color_temp_index)){
-          xQueueSend(led_message_queue, &((led_message_t) {.event_sig = ANIM_TICK_SIG}), 0);
+          xQueueSend(led_message_queue, &((struct led_message_t) {.event_sig = ANIM_TICK_SIG}), 0);
           
           restart_time_event(storage_write_timer, STORAGE_WRITE_PERIOD);
         }
@@ -203,7 +207,7 @@ void led_task(void *pvParameters) {
         else if ((target_color_temp_index >= TEMP_INDEX_PRESET_2) && (target_color_temp_index < TEMP_INDEX_PRESET_3)) target_color_temp_index = TEMP_INDEX_PRESET_3;
 
         if ((current_brightness_index != target_brightness_index) || (current_color_temp_index != target_color_temp_index)){
-          xQueueSend(led_message_queue, &((led_message_t) {.event_sig = ANIM_TICK_SIG}), 0);
+          xQueueSend(led_message_queue, &((struct led_message_t) {.event_sig = ANIM_TICK_SIG}), 0);
           restart_time_event(storage_write_timer, STORAGE_WRITE_PERIOD);
         }
 
@@ -259,11 +263,11 @@ void led_task(void *pvParameters) {
 }
 
 void led_animation_callback(void *args){
-  xQueueSend(led_message_queue, &((led_message_t) {.event_sig = ANIM_TICK_SIG}), 0);
+  xQueueSend(led_message_queue, &((struct led_message_t) {.event_sig = ANIM_TICK_SIG}), 0);
 }
 
 void storage_write_callback(void * args){
-  xQueueSend(led_message_queue, &((led_message_t) {.event_sig = STORAGE_SIG}), 0);
+  xQueueSend(led_message_queue, &((struct led_message_t) {.event_sig = STORAGE_SIG}), 0);
 }
 
 void espnow_setup(void)
@@ -285,9 +289,9 @@ void espnow_setup(void)
 
 static void espnow_recv_cb(const esp_now_recv_info_t *esp_now_info, const uint8_t *data, int data_len)
 {
-    if (data_len != sizeof(app_pkt_t)) return;
-    const app_pkt_t *msg = (const app_pkt_t *)data;
-    led_message_t message = {0};
+    if (data_len != sizeof(struct app_pkt_t)) return;
+    const struct app_pkt_t *msg = (const struct app_pkt_t *)data;
+    struct led_message_t message = {0};
     switch (msg->type) {
         case PKT_BRIGHTNESS_EVENT:
           message.brightness_index = msg->knob_delta;
@@ -320,7 +324,7 @@ static void IRAM_ATTR power_btn_isr(void *arg)
     if ((now - last_trigger_us) < BUTTON_DEBOUNCE_US) return;   // 50 ms guard
     last_trigger_us = now;
 
-    xQueueSendFromISR(led_message_queue, &((led_message_t){.event_sig = POWER_SIG}), &isTaskWoken);
+    xQueueSendFromISR(led_message_queue, &((struct led_message_t){.event_sig = POWER_SIG}), &isTaskWoken);
 
     if (isTaskWoken) portYIELD_FROM_ISR();
 }
@@ -334,7 +338,7 @@ static void IRAM_ATTR preset_btn_isr(void *arg)
     if ((now - last_trigger_us_preset) < BUTTON_DEBOUNCE_US) return;   // 50 ms guard
     last_trigger_us_preset = now;
 
-    xQueueSendFromISR(led_message_queue, &((led_message_t){.event_sig = COLOR_TEMP_SIG}), &isTaskWoken);
+    xQueueSendFromISR(led_message_queue, &((struct led_message_t){.event_sig = COLOR_TEMP_SIG}), &isTaskWoken);
     if (isTaskWoken) portYIELD_FROM_ISR();
 }
 
